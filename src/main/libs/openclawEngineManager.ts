@@ -306,6 +306,8 @@ export class OpenClawEngineManager extends EventEmitter {
       return this.getStatus();
     }
 
+    this.ensureBareEntryFiles(runtime.root);
+
     const openclawEntry = this.resolveOpenClawEntry(runtime.root);
     if (!openclawEntry) {
       this.setStatus({
@@ -455,13 +457,101 @@ export class OpenClawEngineManager extends EventEmitter {
     return null;
   }
 
+  private ensureBareEntryFiles(runtimeRoot: string): void {
+    const bareEntry = path.join(runtimeRoot, 'openclaw.mjs');
+    const bareDistEntry = path.join(runtimeRoot, 'dist', 'entry.js');
+
+    if (fs.existsSync(bareEntry) && fs.existsSync(bareDistEntry)) {
+      return;
+    }
+
+    const asarRoot = path.join(runtimeRoot, 'gateway.asar');
+    const asarEntry = path.join(asarRoot, 'openclaw.mjs');
+    if (!fs.existsSync(asarEntry)) {
+      return;
+    }
+
+    console.log('[OpenClaw] Bare entry files missing, extracting from gateway.asar...');
+
+    try {
+      if (!fs.existsSync(bareEntry)) {
+        fs.writeFileSync(bareEntry, fs.readFileSync(asarEntry));
+        console.log('[OpenClaw] Extracted openclaw.mjs');
+      }
+
+      const asarDist = path.join(asarRoot, 'dist');
+      const bareDist = path.join(runtimeRoot, 'dist');
+      if (fs.existsSync(asarDist) && !fs.existsSync(bareDistEntry)) {
+        this.copyDirFromAsar(asarDist, bareDist);
+        console.log('[OpenClaw] Extracted dist/');
+      }
+
+      console.log('[OpenClaw] Entry files extracted successfully.');
+    } catch (err) {
+      console.error('[OpenClaw] Failed to extract entry files from gateway.asar:', err);
+    }
+  }
+
+  private copyDirFromAsar(srcDir: string, destDir: string): void {
+    fs.mkdirSync(destDir, { recursive: true });
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(srcDir, entry.name);
+      const destPath = path.join(destDir, entry.name);
+      if (entry.isDirectory()) {
+        this.copyDirFromAsar(srcPath, destPath);
+      } else {
+        fs.writeFileSync(destPath, fs.readFileSync(srcPath));
+      }
+    }
+  }
+
   private resolveOpenClawEntry(runtimeRoot: string): string | null {
-    return findPath([
+    const esmEntry = findPath([
       path.join(runtimeRoot, 'openclaw.mjs'),
       path.join(runtimeRoot, 'dist', 'entry.js'),
       path.join(runtimeRoot, 'dist', 'entry.mjs'),
       path.join(runtimeRoot, 'gateway.asar', 'openclaw.mjs'),
     ]);
+    if (!esmEntry) return null;
+
+    // On Windows, utilityProcess.fork() cannot load ESM modules directly because
+    // the ESM loader misinterprets the drive letter (e.g. "D:") as a URL scheme.
+    // Work around this by generating a CJS wrapper that imports the ESM entry via file:// URL.
+    if (process.platform === 'win32') {
+      return this.ensureGatewayLauncherCjs(runtimeRoot, esmEntry);
+    }
+    return esmEntry;
+  }
+
+  private ensureGatewayLauncherCjs(runtimeRoot: string, esmEntry: string): string {
+    const launcherPath = path.join(runtimeRoot, 'gateway-launcher.cjs');
+    const esmBasename = path.basename(esmEntry);
+    const expectedContent =
+      `// Auto-generated CJS wrapper for Windows ESM compatibility.\n` +
+      `// On Windows, Electron utilityProcess.fork() cannot load ESM modules directly\n` +
+      `// because the drive letter (e.g. "D:") is misinterpreted as a URL scheme.\n` +
+      `const { pathToFileURL } = require('node:url');\n` +
+      `const path = require('node:path');\n` +
+      `const esmEntry = path.join(__dirname, '${esmBasename}');\n` +
+      `// Patch argv[1] so openclaw's isMainModule() recognizes this as the main entry.\n` +
+      `process.argv[1] = esmEntry;\n` +
+      `import(pathToFileURL(esmEntry).href).catch(err => {\n` +
+      `  process.stderr.write('[openclaw-launcher] ' + (err.stack || err) + '\\n');\n` +
+      `  process.exit(1);\n` +
+      `});\n`;
+
+    try {
+      const existing = fs.existsSync(launcherPath) ? fs.readFileSync(launcherPath, 'utf8') : '';
+      if (existing !== expectedContent) {
+        fs.writeFileSync(launcherPath, expectedContent, 'utf8');
+        console.log(`[OpenClaw] Generated gateway-launcher.cjs for Windows ESM compat`);
+      }
+    } catch (err) {
+      console.error('[OpenClaw] Failed to write gateway-launcher.cjs:', err);
+      return esmEntry;
+    }
+    return launcherPath;
   }
 
   private resolveGatewayClientEntry(runtimeRoot: string): string | null {

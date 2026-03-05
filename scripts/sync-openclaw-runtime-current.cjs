@@ -26,3 +26,35 @@ fs.rmSync(currentRuntimeDir, { recursive: true, force: true });
 fs.cpSync(targetRuntimeDir, currentRuntimeDir, { recursive: true, force: true });
 
 console.log(`[sync-openclaw-runtime-current] Synced ${targetId} -> vendor/openclaw-runtime/current`);
+
+// Extract entry files from gateway.asar if bare files are missing.
+// On Windows, Electron's utilityProcess.fork() cannot load ESM from inside .asar archives,
+// so bare files must exist on the real filesystem.
+const gatewayAsarPath = path.join(currentRuntimeDir, 'gateway.asar');
+const bareEntryPath = path.join(currentRuntimeDir, 'openclaw.mjs');
+if (fs.existsSync(gatewayAsarPath) && !fs.existsSync(bareEntryPath)) {
+  try {
+    const asar = require('@electron/asar');
+    const entries = asar.listPackage(gatewayAsarPath);
+    const toExtract = entries.filter(function (e) {
+      const normalized = e.replace(/\\/g, '/');
+      return normalized === '/openclaw.mjs' || normalized.startsWith('/dist/');
+    });
+
+    for (const entry of toExtract) {
+      const normalized = entry.replace(/\\/g, '/').replace(/^\//, '');
+      const destPath = path.join(currentRuntimeDir, normalized);
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      try {
+        const content = asar.extractFile(gatewayAsarPath, normalized);
+        fs.writeFileSync(destPath, content);
+      } catch (_e) {
+        // directory entries, skip
+      }
+    }
+
+    console.log(`[sync-openclaw-runtime-current] Extracted ${toExtract.length} entry files from gateway.asar`);
+  } catch (err) {
+    console.warn(`[sync-openclaw-runtime-current] Could not extract from gateway.asar: ${err.message}`);
+  }
+}
