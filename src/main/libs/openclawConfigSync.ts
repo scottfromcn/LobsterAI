@@ -409,20 +409,10 @@ export class OpenClawConfigSync {
       gateway: {
         mode: 'local',
       },
-      ...(preinstalledPluginIds.length > 0
-        ? {
-            plugins: {
-              entries: {
-                ...Object.fromEntries(
-                  preinstalledPluginIds.map((id) => [id, { enabled: true }]),
-                ),
-                ...(preinstalledPluginIds.includes('feishu-openclaw-plugin')
-                  ? { feishu: { enabled: false } }
-                  : {}),
-              },
-            },
-          }
-        : {}),
+      // Don't enable plugins in minimal config — plugin loading via jiti happens
+      // synchronously BEFORE the HTTP server binds, and can block gateway startup
+      // for minutes on a fresh install.  Plugins will be enabled when the user
+      // configures an API model and a full config sync runs.
     };
 
     const nextContent = `${JSON.stringify(minimalConfig, null, 2)}\n`;
@@ -433,13 +423,19 @@ export class OpenClawConfigSync {
       currentContent = '';
     }
 
-    // If the file already has a full config (from a previous sync), don't
-    // downgrade it to the minimal version.
+    // If the file already has a meaningful config (from a previous sync or
+    // user configuration), don't downgrade it to the minimal version.
+    // Check for models (API configured), plugin entries (IM channels like
+    // DingTalk/WeCom), or gateway.mode already set.
     if (currentContent && currentContent !== nextContent) {
       try {
         const existing = JSON.parse(currentContent);
-        if (existing.models?.providers) {
-          // Already has a full config — keep it.
+        if (
+          existing.models?.providers ||
+          existing.plugins?.entries ||
+          existing.gateway?.mode
+        ) {
+          // Already has a config with substance — keep it.
           return { ok: true, changed: false, configPath };
         }
       } catch {

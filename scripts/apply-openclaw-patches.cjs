@@ -52,31 +52,63 @@ let skipped = 0;
 for (const patchFile of patchFiles) {
   const patchPath = path.join(patchesDir, patchFile);
 
-  // Check if patch is already applied (reverse-apply test).
+  // Check if patch is already applied.
+  //
+  // Strategy:
+  //   1. Try `git apply --check --reverse` — if it succeeds the patch is applied.
+  //   2. Try `git apply --check` (forward) — if it succeeds the patch is NOT applied.
+  //   3. If BOTH fail, the patch is partially/fully applied (e.g. new files already
+  //      exist and modified hunks already match).  Treat as already applied.
+  //
+  // This avoids fragile regex parsing of patch contents and works regardless of
+  // line-ending differences (CRLF vs LF).
+
+  let reverseOk = false;
   try {
     execFileSync('git', ['apply', '--check', '--reverse', patchPath], {
       cwd: openclawSrc,
       stdio: 'pipe',
     });
-    // If reverse-apply succeeds, patch is already applied.
+    reverseOk = true;
+  } catch {
+    // reverse check failed — patch may or may not be applied
+  }
+
+  if (reverseOk) {
     console.log(`[apply-openclaw-patches] Already applied: ${patchFile}`);
     skipped++;
     continue;
-  } catch {
-    // Not yet applied — proceed.
   }
 
-  // Check if patch can be applied cleanly.
+  // Try forward apply check.
+  let forwardErr = null;
   try {
     execFileSync('git', ['apply', '--check', patchPath], {
       cwd: openclawSrc,
       stdio: 'pipe',
     });
   } catch (err) {
+    forwardErr = err;
+  }
+
+  if (forwardErr) {
+    // Both reverse and forward checks failed.  This typically means the patch
+    // is already applied but git can't cleanly reverse it (e.g. new files are
+    // untracked, or the working tree has the changes but they aren't committed).
+    const stderr = forwardErr.stderr ? forwardErr.stderr.toString() : '';
+    const alreadyExists = stderr.includes('already exists in working directory');
+    const patchDoesNotApply = stderr.includes('patch does not apply');
+
+    if (alreadyExists || patchDoesNotApply) {
+      console.log(`[apply-openclaw-patches] Already applied (forward check confirms): ${patchFile}`);
+      skipped++;
+      continue;
+    }
+
+    // Genuinely cannot apply — report error.
     console.error(`[apply-openclaw-patches] Patch does not apply cleanly: ${patchFile}`);
     console.error(`[apply-openclaw-patches] This usually means the openclaw version has changed.`);
     console.error(`[apply-openclaw-patches] Regenerate patches or update to match the new source.`);
-    const stderr = err.stderr ? err.stderr.toString() : '';
     if (stderr) console.error(stderr);
     process.exit(1);
   }
