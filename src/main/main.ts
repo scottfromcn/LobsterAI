@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu, protocol, net } from 'electron';
 import type { WebContents } from 'electron';
 import path from 'path';
 import fs from 'fs';
@@ -3238,7 +3238,7 @@ if (!gotTheLock) {
         "default-src 'self'",
         isDev ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}` : "script-src 'self'",
         "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data: https: http:",
+        "img-src 'self' data: https: http: localfile:",
         // 允许连接到所有域名，不做限制
         "connect-src *",
         "font-src 'self' data:",
@@ -3562,6 +3562,13 @@ if (!gotTheLock) {
       console.log('Created default project directory:', defaultProjectDir);
     }
     console.log('[Main] initApp: default project dir ensured');
+
+    // 注册 localfile:// 自定义协议，用于安全加载本地文件（图片等）
+    protocol.handle('localfile', (request) => {
+      const url = new URL(request.url);
+      const filePath = decodeURIComponent(url.pathname);
+      return net.fetch(`file://${filePath}`);
+    });
 
     console.log('[Main] initApp: starting initStore()');
     store = await initStore();
