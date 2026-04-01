@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import Modal from './common/Modal';
 import { configService } from '../services/config';
 import { apiService } from '../services/api';
 import { checkForAppUpdate } from '../services/appUpdate';
@@ -3613,10 +3614,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 modal-backdrop flex items-center justify-center"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
+    <Modal onClose={onClose} overlayClassName="fixed inset-0 z-50 modal-backdrop flex items-center justify-center">
       <div
         className="relative flex w-[900px] h-[80vh] rounded-2xl border-border border shadow-modal overflow-hidden modal-content"
         onClick={handleSettingsClick}
@@ -4003,7 +4001,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, onUpda
             </div>
           )}
       </div>
-    </div>
+    </Modal>
   );
 };
 

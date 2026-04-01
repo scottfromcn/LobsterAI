@@ -29,6 +29,7 @@ import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
 import { getScheduledReminderDisplayText } from '../../../scheduledTask/reminderText';
 import DiffView, { extractDiffFromToolInput } from './DiffView';
+import Modal from '../common/Modal';
 
 interface CoworkSessionDetailProps {
   onManageSkills?: () => void;
@@ -2262,14 +2263,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
       {/* Delete Confirmation Modal */}
       {showConfirmDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop"
-          onClick={handleCancelDelete}
-        >
-          <div
-            className="w-full max-w-sm mx-4 bg-surface rounded-2xl shadow-modal overflow-hidden modal-content"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <Modal onClose={handleCancelDelete} overlayClassName="fixed inset-0 z-50 flex items-center justify-center modal-backdrop" className="w-full max-w-sm mx-4 bg-surface rounded-2xl shadow-modal overflow-hidden modal-content">
             {/* Header */}
             <div className="flex items-center gap-3 px-5 py-4">
               <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
@@ -2302,11 +2296,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 {i18nService.t('deleteSession')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
-
-      {/* Messages */}
       <div className="relative flex-1 min-h-0">
         <div
           ref={scrollContainerRef}

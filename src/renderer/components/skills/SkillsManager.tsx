@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import Modal from '../common/Modal';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   ArrowDownTrayIcon,
@@ -860,14 +861,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly }) => {
       )}
 
       {selectedMarketplaceSkill && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={() => setSelectedMarketplaceSkill(null)}
-        >
-          <div
-            className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal onClose={() => setSelectedMarketplaceSkill(null)} overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/60" className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6">
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-9 h-9 rounded-lg bg-background flex items-center justify-center flex-shrink-0">
@@ -964,19 +958,11 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly }) => {
                 </button>
               ) : null;
             })()}
-          </div>
-        </div>
+        </Modal>
       , document.body)}
 
       {selectedSkill && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={() => setSelectedSkill(null)}
-        >
-          <div
-            className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal onClose={() => setSelectedSkill(null)} overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/60" className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6">
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-9 h-9 rounded-lg bg-background flex items-center justify-center flex-shrink-0">
@@ -1081,19 +1067,11 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly }) => {
                 />
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       , document.body)}
 
       {skillPendingDelete && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={handleCancelDeleteSkill}
-        >
-          <div
-            className="w-full max-w-sm mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-5"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal onClose={handleCancelDeleteSkill} overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/60" className="w-full max-w-sm mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-5">
             <div className="text-lg font-semibold text-foreground">
               {i18nService.t('deleteSkill')}
             </div>
@@ -1123,19 +1101,11 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly }) => {
                 {i18nService.t('confirmDelete')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       , document.body)}
 
       {isRemoteImportOpen && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={() => setIsRemoteImportOpen(false)}
-        >
-          <div
-            className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal onClose={() => setIsRemoteImportOpen(false)} overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/60" className="w-full max-w-md mx-4 rounded-2xl bg-surface border border-border shadow-2xl p-6">
             <div className="flex items-start justify-between">
               <div className="text-lg font-semibold text-foreground">
                 {i18nService.t('remoteImportTitle')}
@@ -1201,8 +1171,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly }) => {
                 {isDownloadingSkill ? i18nService.t('importingSkill') : i18nService.t('importSkill')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       , document.body)}
 
       {securityReport && (
