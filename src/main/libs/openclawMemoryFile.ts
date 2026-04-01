@@ -96,7 +96,7 @@ export function parseMemoryMd(content: string): OpenClawMemoryEntry[] {
     const match = line.trim().match(BULLET_RE);
     if (!match?.[1]) continue;
     const text = match[1].replace(/\s+/g, ' ').trim();
-    if (!text || text.length < 1) continue;
+    if (!text) continue;
 
     const fp = fingerprint(text);
     if (seen.has(fp)) continue;
@@ -117,18 +117,20 @@ export function serializeMemoryMd(entries: OpenClawMemoryEntry[]): string {
 }
 
 /**
- * Build updated MEMORY.md content by surgically patching bullet lines
- * while preserving the original document structure exactly.
+ * Build updated MEMORY.md content by surgically applying a diff between
+ * the original bullet entries and the desired entries, while preserving
+ * all non-bullet content and the overall document structure.
  *
  * Strategy:
- *   1. Walk original lines in order.
- *   2. For each bullet line, look up its ID in the new entries map:
- *      - If found → emit the (possibly updated) text and mark as handled.
- *      - If not found → the entry was deleted, skip the line.
- *   3. Non-bullet content (headings, prose, blank lines) is always kept verbatim.
- *   4. After the full pass, any entries that were NOT matched to an existing
- *      bullet (i.e. genuinely new additions) are appended at the end so the
- *      original structure is never disturbed.
+ *   1. Build a map from old fingerprint → new text for modified entries.
+ *   2. Build a set of fingerprints that should be removed.
+ *   3. Walk original lines:
+ *      - Non-bullet lines → keep verbatim (headings, prose, blank lines).
+ *      - Bullet lines whose fingerprint is in the removal set → skip.
+ *      - Bullet lines whose fingerprint is in the update map → replace in-place.
+ *      - Bullet lines not in the new entry set → skip (deleted).
+ *      - Other bullet lines → keep as-is.
+ *   4. Append genuinely new entries (not present in original) at the end.
  */
 function rebuildMemoryMd(
   originalContent: string,
@@ -138,10 +140,23 @@ function rebuildMemoryMd(
     return serializeMemoryMd(entries);
   }
 
-  // Build a map of id → entry for O(1) lookup, and a set to track which
-  // entries have been placed (matched an existing bullet in the document).
-  const entryMap = new Map<string, OpenClawMemoryEntry>(entries.map((e) => [e.id, e]));
-  const placed = new Set<string>();
+  // Build lookup structures for the desired state
+  const desiredById = new Map<string, string>();
+  for (const e of entries) {
+    desiredById.set(e.id, e.text);
+  }
+
+  // Parse original bullets to know what existed before
+  const originalEntries = parseMemoryMd(originalContent);
+  const originalIds = new Set(originalEntries.map((e) => e.id));
+
+  // Identify new entries (not in original) to append later
+  const newEntries: OpenClawMemoryEntry[] = [];
+  for (const e of entries) {
+    if (!originalIds.has(e.id)) {
+      newEntries.push(e);
+    }
+  }
 
   const lines = originalContent.split(/\r?\n/);
   const result: string[] = [];
@@ -161,32 +176,64 @@ function rebuildMemoryMd(
 
     if (isBulletLine(line)) {
       const match = line.trim().match(BULLET_RE);
-      const originalText = match?.[1]?.replace(/\s+/g, ' ').trim() ?? '';
-      const originalId = fingerprint(originalText);
+      if (match?.[1]) {
+        const text = match[1].replace(/\s+/g, ' ').trim();
+        if (text) {
+          const fp = fingerprint(text);
 
-      const updated = entryMap.get(originalId);
-      if (updated) {
-        // Entry still exists (possibly with updated text) → emit it in place
-        result.push(`- ${updated.text}`);
-        placed.add(originalId);
+          if (desiredById.has(fp)) {
+            // Entry still exists (possibly with updated text via id change)
+            // Keep it at its original position
+            const desiredText = desiredById.get(fp)!;
+            // Preserve original indentation
+            const indent = line.match(/^(\s*)/)?.[1] ?? '';
+            result.push(`${indent}- ${desiredText}`);
+            desiredById.delete(fp); // mark as handled
+            continue;
+          }
+
+          // Check if this position's entry was updated (old id removed,
+          // but the entry at this position may have been edited).
+          // Since we can't map old→new by position for edits, entries
+          // not in desiredById are considered deleted → skip this line.
+          continue;
+        }
       }
-      // else: entry was deleted from the list → drop the line (don't emit)
+      // Malformed bullet → keep as-is
+      result.push(line);
       continue;
     }
 
     result.push(line);
   }
 
-  // Append genuinely new entries (those not matched to any existing bullet)
-  const newEntries = entries.filter((e) => !placed.has(e.id));
+  // Append genuinely new entries at the end
   if (newEntries.length > 0) {
-    // Add a blank separator only if the last non-empty line isn't already blank
-    const trimmed = result[result.length - 1]?.trim();
-    if (trimmed !== undefined && trimmed !== '') {
+    // Ensure blank line before new entries
+    const lastLine = result[result.length - 1];
+    if (lastLine !== undefined && lastLine.trim() !== '') {
       result.push('');
     }
     for (const e of newEntries) {
       result.push(`- ${e.text}`);
+    }
+  }
+
+  // Also append any remaining entries from desiredById that were not
+  // matched to an original bullet (e.g. entries whose text was updated,
+  // producing a new id). These are effectively "updated" entries that
+  // lost their positional anchor.
+  const remaining = [...desiredById.values()].filter((text) => {
+    // Exclude entries that were already appended as newEntries
+    return !newEntries.some((ne) => ne.text === text);
+  });
+  if (remaining.length > 0) {
+    const lastLine = result[result.length - 1];
+    if (lastLine !== undefined && lastLine.trim() !== '') {
+      result.push('');
+    }
+    for (const text of remaining) {
+      result.push(`- ${text}`);
     }
   }
 
