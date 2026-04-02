@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PhotoIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import PaperClipIcon from '../icons/PaperClipIcon';
+import AttachmentCard from './AttachmentCard';
 import XMarkIcon from '../icons/XMarkIcon';
 import ModelSelector from '../ModelSelector';
 import FolderSelectorPopover from './FolderSelectorPopover';
@@ -23,7 +24,7 @@ type CoworkAttachment = DraftAttachment;
 
 const INPUT_FILE_LABEL = '输入文件';
 
-const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif']);
 
 const isImagePath = (filePath: string): boolean => {
   const dotIndex = filePath.lastIndexOf('.');
@@ -593,27 +594,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachments.map((attachment) => (
-              <div
-                key={attachment.path}
-                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-foreground max-w-full"
-                title={attachment.path}
-              >
-                {attachment.isImage ? (
-                  <PhotoIcon className="h-3.5 w-3.5 flex-shrink-0 text-blue-500" />
-                ) : (
-                  <PaperClipIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                )}
-                <span className="truncate max-w-[180px]">{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveAttachment(attachment.path)}
-                  className="ml-0.5 rounded-full p-0.5 hover:bg-surface-raised"
-                  aria-label={i18nService.t('coworkAttachmentRemove')}
-                  title={i18nService.t('coworkAttachmentRemove')}
-                >
-                  <XMarkIcon className="h-3 w-3" />
-                </button>
-              </div>
+            <AttachmentCard
+              key={attachment.path}
+              attachment={attachment}
+              onRemove={handleRemoveAttachment}
+            />
           ))}
         </div>
       )}

@@ -3697,6 +3697,10 @@ if (!gotTheLock) {
     '.webp': 'image/webp',
     '.bmp': 'image/bmp',
     '.svg': 'image/svg+xml',
+    '.tiff': 'image/tiff',
+    '.tif': 'image/tiff',
+    '.ico': 'image/x-icon',
+    '.avif': 'image/avif',
   };
   ipcMain.handle(
     'dialog:readFileAsDataUrl',
