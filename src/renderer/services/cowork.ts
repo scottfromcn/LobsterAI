@@ -28,6 +28,7 @@ import type {
   OpenClawEngineStatus,
   CoworkStartOptions,
   CoworkContinueOptions,
+  OpenClawSessionPolicyConfig,
 } from '../types/cowork';
 import { i18nService } from './i18n';
 import { classifyErrorKey } from '../../common/coworkErrorClassify';
@@ -213,9 +214,18 @@ class CoworkService {
   }
 
   async loadConfig(): Promise<void> {
-    const result = await window.electron?.cowork?.getConfig();
-    if (result?.success && result.config) {
-      store.dispatch(setConfig(result.config));
+    const [coworkResult, sessionPolicyResult] = await Promise.all([
+      window.electron?.cowork?.getConfig(),
+      window.electron?.openclaw?.sessionPolicy?.get?.(),
+    ]);
+
+    if (coworkResult?.success && coworkResult.config) {
+      store.dispatch(setConfig({
+        ...coworkResult.config,
+        openClawSessionPolicy: sessionPolicyResult?.success && sessionPolicyResult.config
+          ? sessionPolicyResult.config
+          : { keepAlive: '7d' },
+      }));
     }
   }
 
@@ -517,6 +527,24 @@ class CoworkService {
     }
 
     console.error('Failed to update config:', result.error);
+    return false;
+  }
+
+  async updateSessionPolicy(config: OpenClawSessionPolicyConfig): Promise<boolean> {
+    const sessionPolicyApi = window.electron?.openclaw?.sessionPolicy;
+    if (!sessionPolicyApi) return false;
+
+    const currentConfig = store.getState().cowork.config;
+    const result = await sessionPolicyApi.set(config);
+    if (result.success) {
+      store.dispatch(setConfig({
+        ...currentConfig,
+        openClawSessionPolicy: result.config ?? config,
+      }));
+      return true;
+    }
+
+    console.error('Failed to update OpenClaw session policy:', result.error);
     return false;
   }
 

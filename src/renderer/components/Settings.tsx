@@ -23,9 +23,11 @@ import ThemedSelect from './ui/ThemedSelect';
 import type {
   CoworkAgentEngine,
   OpenClawEngineStatus,
+  OpenClawSessionKeepAlive,
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
 } from '../types/cowork';
+import { OpenClawSessionKeepAlive as OpenClawSessionKeepAliveValues } from '../types/cowork';
 import IMSettings from './im/IMSettings';
 import { imService } from '../services/im';
 import EmailSkillConfig from './skills/EmailSkillConfig';
@@ -766,6 +768,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
   const [coworkMemoryEnabled, setCoworkMemoryEnabled] = useState<boolean>(coworkConfig.memoryEnabled ?? true);
   const [coworkMemoryLlmJudgeEnabled, setCoworkMemoryLlmJudgeEnabled] = useState<boolean>(coworkConfig.memoryLlmJudgeEnabled ?? false);
   const [skipMissedJobs, setSkipMissedJobs] = useState<boolean>(coworkConfig.skipMissedJobs ?? false);
+  const [openClawSessionKeepAlive, setOpenClawSessionKeepAlive] = useState<OpenClawSessionKeepAlive>(
+    coworkConfig.openClawSessionPolicy?.keepAlive || OpenClawSessionKeepAliveValues.SevenDays,
+  );
   const [coworkMemoryEntries, setCoworkMemoryEntries] = useState<CoworkUserMemoryEntry[]>([]);
   const [coworkMemoryStats, setCoworkMemoryStats] = useState<CoworkMemoryStats | null>(null);
   const [coworkMemoryListLoading, setCoworkMemoryListLoading] = useState<boolean>(false);
@@ -784,10 +789,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
     setCoworkMemoryEnabled(coworkConfig.memoryEnabled ?? true);
     setCoworkMemoryLlmJudgeEnabled(coworkConfig.memoryLlmJudgeEnabled ?? false);
     setSkipMissedJobs(coworkConfig.skipMissedJobs ?? false);
+    setOpenClawSessionKeepAlive(coworkConfig.openClawSessionPolicy?.keepAlive || OpenClawSessionKeepAliveValues.SevenDays);
   }, [
     coworkConfig.agentEngine,
     coworkConfig.memoryEnabled,
     coworkConfig.memoryLlmJudgeEnabled,
+    coworkConfig.openClawSessionPolicy?.keepAlive,
     coworkConfig.skipMissedJobs,
   ]);
 
@@ -1404,7 +1411,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
   const hasCoworkConfigChanges = coworkAgentEngine !== coworkConfig.agentEngine
     || coworkMemoryEnabled !== coworkConfig.memoryEnabled
     || coworkMemoryLlmJudgeEnabled !== coworkConfig.memoryLlmJudgeEnabled
-    || skipMissedJobs !== (coworkConfig.skipMissedJobs ?? false);
+    || skipMissedJobs !== (coworkConfig.skipMissedJobs ?? false)
+    || openClawSessionKeepAlive !== (coworkConfig.openClawSessionPolicy?.keepAlive || OpenClawSessionKeepAliveValues.SevenDays);
   const isOpenClawAgentEngine = coworkAgentEngine === 'openclaw';
 
   const openClawProgressPercent = useMemo(() => {
@@ -1765,6 +1773,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
         if (!updated) {
           throw new Error(i18nService.t('coworkConfigSaveFailed'));
         }
+        const savedSessionPolicy = await coworkService.updateSessionPolicy({
+          keepAlive: openClawSessionKeepAlive,
+        });
+        if (!savedSessionPolicy) {
+          throw new Error(i18nService.t('coworkConfigSaveFailed'));
+        }
       }
 
       // Save bootstrap files (IDENTITY.md, USER.md, SOUL.md) only if loaded
@@ -1782,7 +1796,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
       // Sync IM gateway config (regenerate openclaw.json and restart gateway if running).
       // This is done on every save regardless of activeTab, because the user may have
       // edited IM config then switched tabs before clicking Save.
-      await imService.saveAndSyncConfig();
+      const syncSucceeded = await imService.saveAndSyncConfig();
+      if (!syncSucceeded) {
+        throw new Error(i18nService.t('settingsSavedButOpenClawSyncFailed'));
+      }
 
       didSaveRef.current = true;
       onClose();
@@ -2604,6 +2621,33 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                   />
                 </button>
               </label>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-3">
+                {i18nService.t('openClawSessionKeepAlive')}
+              </label>
+              <p className="text-sm text-secondary mb-3">
+                {i18nService.t('openClawSessionKeepAliveHint')}
+              </p>
+              <select
+                value={openClawSessionKeepAlive}
+                onChange={(event) => setOpenClawSessionKeepAlive(event.target.value as OpenClawSessionKeepAlive)}
+                className="w-full rounded-lg border px-3 py-2 text-sm border-border bg-surface text-foreground"
+              >
+                <option value={OpenClawSessionKeepAliveValues.OneDay}>
+                  {i18nService.t('openClawSessionKeepAliveOneDay')}
+                </option>
+                <option value={OpenClawSessionKeepAliveValues.SevenDays}>
+                  {i18nService.t('openClawSessionKeepAliveSevenDays')}
+                </option>
+                <option value={OpenClawSessionKeepAliveValues.ThirtyDays}>
+                  {i18nService.t('openClawSessionKeepAliveThirtyDays')}
+                </option>
+                <option value={OpenClawSessionKeepAliveValues.OneYear}>
+                  {i18nService.t('openClawSessionKeepAliveOneYear')}
+                </option>
+              </select>
             </div>
 
             {/* Appearance Section — mode selector + theme gallery */}

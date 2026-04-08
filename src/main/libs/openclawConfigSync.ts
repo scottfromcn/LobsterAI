@@ -21,6 +21,8 @@ import { parseChannelSessionKey } from './openclawChannelSessionSync';
 import type { OpenClawEngineManager } from './openclawEngineManager';
 import { findThirdPartyExtensionsDir, hasBundledOpenClawExtension } from './openclawLocalExtensions';
 import { getOpenClawTokenProxyPort } from './openclawTokenProxy';
+import { buildOpenClawSessionConfig } from '../openclawSessionPolicy/store';
+import { OpenClawSessionKeepAlive } from '../openclawSessionPolicy/constants';
 
 export type McpBridgeConfig = {
   callbackUrl: string;
@@ -681,6 +683,7 @@ type OpenClawConfigSyncDeps = {
   engineManager: OpenClawEngineManager;
   getCoworkConfig: () => CoworkConfig;
   isEnterprise: () => boolean;
+  getOpenClawSessionPolicy?: () => { keepAlive: OpenClawSessionKeepAlive };
   getTelegramOpenClawConfig?: () => TelegramOpenClawConfig | null;
   getDiscordOpenClawConfig?: () => DiscordOpenClawConfig | null;
   getDingTalkInstances: () => DingTalkInstanceConfig[];
@@ -701,6 +704,7 @@ export class OpenClawConfigSync {
   private readonly engineManager: OpenClawEngineManager;
   private readonly getCoworkConfig: () => CoworkConfig;
   private readonly isEnterprise: () => boolean;
+  private readonly getOpenClawSessionPolicy?: () => { keepAlive: OpenClawSessionKeepAlive };
   private readonly getTelegramOpenClawConfig?: () => TelegramOpenClawConfig | null;
   private readonly getDiscordOpenClawConfig?: () => DiscordOpenClawConfig | null;
   private readonly getDingTalkInstances: () => DingTalkInstanceConfig[];
@@ -722,6 +726,7 @@ export class OpenClawConfigSync {
     this.engineManager = deps.engineManager;
     this.getCoworkConfig = deps.getCoworkConfig;
     this.isEnterprise = deps.isEnterprise;
+    this.getOpenClawSessionPolicy = deps.getOpenClawSessionPolicy;
     this.getTelegramOpenClawConfig = deps.getTelegramOpenClawConfig;
     this.getDiscordOpenClawConfig = deps.getDiscordOpenClawConfig;
     this.getDingTalkInstances = deps.getDingTalkInstances;
@@ -736,6 +741,11 @@ export class OpenClawConfigSync {
     this.getMcpBridgeConfig = deps.getMcpBridgeConfig;
     this.getSkillsList = deps.getSkillsList;
     this.getAgents = deps.getAgents;
+  }
+
+  private buildSessionConfig(): Record<string, unknown> {
+    const policy = this.getOpenClawSessionPolicy?.() ?? { keepAlive: OpenClawSessionKeepAlive.SevenDays };
+    return buildOpenClawSessionConfig(policy);
   }
 
   sync(reason: string): OpenClawConfigSyncResult {
@@ -949,9 +959,7 @@ export class OpenClawConfigSync {
         ...this.buildAgentsList(primaryModel),
       },
       ...this.currentBindingsObj,
-      session: {
-        dmScope: 'per-account-channel-peer',
-      },
+      session: this.buildSessionConfig(),
       commands: {
         ownerAllowFrom: MANAGED_OWNER_ALLOW_FROM,
       },
