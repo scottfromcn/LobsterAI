@@ -197,6 +197,21 @@ export interface EmailMultiInstanceStatus {
   instances: EmailInstanceStatus[];
 }
 
+// Default configurations
+export const DEFAULT_EMAIL_INSTANCE_CONFIG: Partial<EmailInstanceConfig> = {
+  enabled: true,
+  transport: 'imap',
+  agentId: 'main',
+  replyMode: 'complete',
+  replyTo: 'sender',
+  a2aEnabled: false,
+  a2aMaxPingPongTurns: 20,
+};
+
+export const DEFAULT_EMAIL_MULTI_INSTANCE_CONFIG: EmailMultiInstanceConfig = {
+  instances: [],
+};
+
 export const MAX_EMAIL_INSTANCES = 5;
 ```
 
@@ -885,9 +900,274 @@ No existing LobsterAI features are affected:
 - Session sync: `src/main/libs/openclawChannelSessionSync.ts`
 - Gateway manager: `src/main/libs/openclawEngineManager.ts`
 
+## Spec Review Corrections
+
+The following issues were identified during spec review and have been addressed:
+
+### 1. Missing Default Configuration Constants
+
+Added to the TypeScript types section:
+
+```typescript
+export const DEFAULT_EMAIL_INSTANCE_CONFIG: Partial<EmailInstanceConfig> = {
+  enabled: true,
+  transport: 'imap',
+  agentId: 'main',
+  replyMode: 'complete',
+  replyTo: 'sender',
+  a2aEnabled: false,
+  a2aMaxPingPongTurns: 20,
+};
+
+export const DEFAULT_EMAIL_MULTI_INSTANCE_CONFIG: EmailMultiInstanceConfig = {
+  instances: [],
+};
+```
+
+### 2. Environment Variable Naming Simplification
+
+**Changed:** `LOBSTER_EMAIL_EMAIL_1_PASSWORD` → `LOBSTER_EMAIL_1_PASSWORD`
+
+Transformation logic updated to:
+
+```typescript
+const envPrefix = `LOBSTER_EMAIL_${inst.instanceId.replace(/^email-/, '').toUpperCase()}`;
+// email-1 → LOBSTER_EMAIL_1_PASSWORD
+// email-work → LOBSTER_EMAIL_WORK_PASSWORD
+```
+
+### 3. Session Key Format Standardization
+
+- **Standardized format:** `agent:{agentId}:email:{accountId}:{threadId}`
+- Updated parsing logic to be defensive against threadId containing colons:
+
+```typescript
+const emailIndex = parts.indexOf('email');
+if (emailIndex !== -1 && emailIndex < parts.length - 2) {
+  const accountId = parts[emailIndex + 1];
+  const threadId = parts.slice(emailIndex + 2).join(':'); // Handle colons in threadId
+}
+```
+
+### 4. IPC Channel Specification
+
+Clarified complete IPC API surface:
+
+```typescript
+// Email configuration (reuses existing IM channels)
+'im:getConfig' → IMGatewayConfig (includes optional email field)
+'im:setConfig' → IMGatewayConfig (includes optional email field)
+'im:getStatus' → IMGatewayStatus (includes optional email field)
+
+// Agent listing for UI dropdown
+'cowork:listAgents' → string[] (agent IDs)
+
+// Connection testing
+'email:testConnection' → { instanceId: string } → { success: boolean; error?: string }
+```
+
+### 5. Validation Function Definitions
+
+Added utility functions specification:
+
+```typescript
+// src/renderer/utils/validation.ts
+export const isValidEmail = (email: string): boolean => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+};
+
+// src/renderer/components/settings/EmailSettings.tsx
+const validateConfig = (): string[] => {
+  const errors: string[] = [];
+  if (emailConfig.instances.length > MAX_EMAIL_INSTANCES) {
+    errors.push(t('emailMaxInstancesExceeded', { count: MAX_EMAIL_INSTANCES }));
+  }
+  const seenIds = new Set<string>();
+  const seenEmails = new Set<string>();
+  for (const inst of emailConfig.instances) {
+    if (seenIds.has(inst.instanceId)) {
+      errors.push(t('emailDuplicateInstanceId', { id: inst.instanceId }));
+    }
+    seenIds.add(inst.instanceId);
+    if (seenEmails.has(inst.email)) {
+      errors.push(t('emailDuplicateEmail', { email: inst.email }));
+    }
+    seenEmails.add(inst.email);
+    if (!isValidEmail(inst.email)) {
+      errors.push(t('emailInvalidEmail', { email: inst.email }));
+    }
+    if (inst.transport === 'imap' && !inst.password) {
+      errors.push(t('emailMissingPassword', { name: inst.instanceName }));
+    }
+    if (inst.transport === 'ws' && !inst.apiKey) {
+      errors.push(t('emailMissingApiKey', { name: inst.instanceName }));
+    }
+    if (inst.transport === 'ws' && inst.apiKey && !inst.apiKey.startsWith('ck_')) {
+      errors.push(t('emailInvalidApiKey', { name: inst.instanceName }));
+    }
+  }
+  return errors;
+};
+```
+
+### 6. Test Connection Implementation
+
+Added implementation approach:
+
+```typescript
+// src/main/main.ts
+ipcMain.handle('email:testConnection', async (event, { instanceId }) => {
+  try {
+    const imStore = getIMGatewayManager().getIMStore();
+    const emailConfig = imStore.getEmailConfig();
+    const instance = emailConfig.instances.find(i => i.instanceId === instanceId);
+    if (!instance) throw new Error('Instance not found');
+
+    if (instance.transport === 'imap') {
+      // Use node-imap library directly
+      const Imap = require('imap');
+      const connection = new Imap({
+        user: instance.email,
+        password: instance.password,
+        host: instance.imapHost || deriveImapHost(instance.email),
+        port: instance.imapPort || 993,
+        tls: true,
+      });
+      await new Promise((resolve, reject) => {
+        connection.once('ready', () => {
+          connection.end();
+          resolve();
+        });
+        connection.once('error', reject);
+        connection.connect();
+      });
+    } else if (instance.transport === 'ws') {
+      // Use @clawemail/node-sdk to fetch token
+      const { fetchIMToken } = require('@clawemail/node-sdk');
+      await fetchIMToken(instance.apiKey, instance.email, console);
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
+});
+```
+
+### 7. Agent Binding Race Condition Fix
+
+Updated session resolution to cache config:
+
+```typescript
+// In OpenClawChannelSessionSync constructor
+this.cachedEmailConfig: EmailMultiInstanceConfig | null = null;
+this.configCacheExpiry = 0;
+
+// In resolveOrCreateSession
+let agentId = 'main';
+if (platform === 'email') {
+  // Cache config for 60 seconds to avoid repeated DB reads
+  if (!this.cachedEmailConfig || Date.now() > this.configCacheExpiry) {
+    this.cachedEmailConfig = this.imStore.getEmailConfig();
+    this.configCacheExpiry = Date.now() + 60_000;
+  }
+  const parts = sessionKey.split(':');
+  const emailIndex = parts.indexOf('email');
+  if (emailIndex !== -1 && emailIndex < parts.length - 2) {
+    const accountId = parts[emailIndex + 1];
+    const instance = this.cachedEmailConfig.instances.find(i => i.instanceId === accountId);
+    if (instance?.agentId) {
+      agentId = instance.agentId;
+    }
+  }
+}
+```
+
+### 8. Plugin Installation Error Handling
+
+Added error handling policy:
+
+```javascript
+// scripts/ensure-openclaw-plugins.cjs
+// Policy: Email plugin installation is non-blocking
+for (const plugin of PLUGINS) {
+  try {
+    if (plugin.localPath && fs.existsSync(plugin.localPath)) {
+      console.log(`[Plugin] Using local path for ${plugin.id}: ${plugin.localPath}`);
+      fs.symlinkSync(plugin.localPath, pluginDir, 'dir');
+    } else {
+      console.log(`[Plugin] Installing ${plugin.id}@${plugin.version}`);
+      execSync(`npm install ${plugin.npmSpec}@${plugin.version}`, {
+        cwd: extensionsDir,
+        stdio: 'inherit',
+      });
+    }
+  } catch (error) {
+    console.error(`[Plugin] Failed to install ${plugin.id}:`, error.message);
+    console.error(`[Plugin] ${plugin.id} will not be available. Continue without it.`);
+    // Non-blocking: app starts without this plugin
+  }
+}
+```
+
+### 9. Internationalization Hardcoded Strings
+
+Fixed all hardcoded Chinese strings:
+
+```typescript
+// Before:
+showError('请先填写有效的邮箱地址');
+showInfo('请在浏览器中完成验证，然后将 API Key 粘贴回来');
+
+// After:
+showError(t('emailEnterValidEmailFirst'));
+showInfo(t('emailVerifyInBrowserAndPaste'));
+```
+
+Added missing translation keys:
+
+- `emailEnterValidEmailFirst`
+- `emailVerifyInBrowserAndPaste`
+- `emailDuplicateInstanceId`
+
+### 10. Runtime Statistics Documentation
+
+Added clarification for `lastInboundAt` / `lastOutboundAt`:
+
+```typescript
+// EmailInstanceStatus fields:
+// - lastInboundAt: Timestamp of last received email (provided by email plugin runtime)
+// - lastOutboundAt: Timestamp of last sent email (provided by email plugin runtime)
+// - Both reset to null when OpenClaw gateway restarts (not persisted)
+// - UI displays as relative time: "2 minutes ago" using libraries like date-fns
+```
+
+### 11. Backward Compatibility
+
+Updated `IMGatewayConfig` and `IMGatewayStatus` to make `email` optional:
+
+```typescript
+export interface IMGatewayConfig {
+  // ... existing required fields
+  email?: EmailMultiInstanceConfig; // Optional: introduced in this version
+}
+
+export interface IMGatewayStatus {
+  // ... existing required fields
+  email?: EmailMultiInstanceStatus; // Optional: introduced in this version
+}
+```
+
+This ensures older code that doesn't expect the `email` field won't break.
+
+### 12. Type System Clarity
+
+Explicitly documented that `IMGatewayConfig` and `IMGatewayStatus` modifications are part of the `src/main/im/types.ts` changes in the "Type System Extensions" section.
+
+---
+
 ## Approval
 
-This design has been reviewed and approved for implementation.
+This design has been reviewed, corrected, and approved for implementation.
 
 **Next Steps:**
 
