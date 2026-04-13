@@ -1,15 +1,16 @@
-import { join } from 'path';
 import { app } from 'electron';
+import { join } from 'path';
+
+import { ProviderName, resolveCodingPlanBaseUrl } from '../../shared/providers';
 import type { SqliteStore } from '../sqliteStore';
 import type { CoworkApiConfig } from './coworkConfigStore';
+import { type AnthropicApiFormat,normalizeProviderApiFormat } from './coworkFormatTransform';
 import {
   configureCoworkOpenAICompatProxy,
-  type OpenAICompatProxyTarget,
   getCoworkOpenAICompatProxyBaseURL,
   getCoworkOpenAICompatProxyStatus,
+  type OpenAICompatProxyTarget,
 } from './coworkOpenAICompatProxy';
-import { normalizeProviderApiFormat, type AnthropicApiFormat } from './coworkFormatTransform';
-import { ProviderName, resolveCodingPlanBaseUrl } from '../../shared/providers';
 
 type ProviderModel = {
   id: string;
@@ -517,6 +518,9 @@ export function resolveAllProviderApiKeys(): Record<string, string> {
       const envName = providerName.toUpperCase().replace(/[^A-Z0-9]/g, '_');
       result[envName] = apiKey || 'sk-lobsterai-local';
     }
+
+    const D = '[GW-RESTART-DIAG]';
+    console.log(`${D} resolveAllProviderApiKeys: hasServer=${!!result.SERVER} providers=[${Object.keys(result).filter(k => k !== 'SERVER').join(',')}]`);
 
     return result;
   }
