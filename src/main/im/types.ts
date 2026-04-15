@@ -446,7 +446,7 @@ export const DEFAULT_EMAIL_INSTANCE_CONFIG: Partial<EmailInstanceConfig> = {
   agentId: 'main',
   replyMode: 'complete',
   replyTo: 'sender',
-  a2aEnabled: false,
+  a2aEnabled: true,
   a2aMaxPingPongTurns: 20,
 };
 

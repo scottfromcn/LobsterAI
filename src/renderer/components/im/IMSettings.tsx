@@ -1944,24 +1944,32 @@ const IMSettings: React.FC = () => {
                 </div>
               </div>
 
-              {/* A2A Config */}
-              <div className="space-y-3 pt-2 border-t border-border-subtle">
-                <label className="text-xs font-medium text-secondary">{i18nService.t('emailA2aConfig')}</label>
-                <label className="flex items-center gap-1.5 text-sm text-foreground cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={inst.a2aEnabled ?? false}
-                    onChange={e => {
-                      const a2aEnabled = e.target.checked;
-                      dispatch(setEmailInstanceConfig({ instanceId: inst.instanceId, config: { a2aEnabled } }));
-                      void imService.persistEmailInstanceConfig(inst.instanceId, { a2aEnabled });
-                    }}
-                    className="accent-primary"
-                  />
-                  {i18nService.t('emailA2aEnabled')}
-                </label>
-                {inst.a2aEnabled && (
-                  <>
+              {/* Advanced Options */}
+              <details className="group">
+                <summary className="cursor-pointer text-xs font-medium text-secondary hover:text-primary transition-colors">
+                  {i18nService.t('imAdvancedSettings')}
+                </summary>
+                <div className="mt-2 space-y-3 pl-2 border-l-2 border-border-subtle">
+                  {/* A2A Config */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-secondary">{i18nService.t('emailA2aEnabled')}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const a2aEnabled = !(inst.a2aEnabled ?? true);
+                          dispatch(setEmailInstanceConfig({ instanceId: inst.instanceId, config: { a2aEnabled } }));
+                          void imService.persistEmailInstanceConfig(inst.instanceId, { a2aEnabled });
+                        }}
+                        className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out cursor-pointer ${
+                          (inst.a2aEnabled ?? true) ? 'bg-green-500' : 'bg-gray-400 dark:bg-gray-600'
+                        }`}
+                      >
+                        <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                          (inst.a2aEnabled ?? true) ? 'translate-x-4' : 'translate-x-0'
+                        }`} />
+                      </button>
+                    </div>
                     <div>
                       <label className={labelClass}>{i18nService.t('emailA2aAgentDomains')}</label>
                       <input
@@ -1994,9 +2002,9 @@ const IMSettings: React.FC = () => {
                         className={inputClass}
                       />
                     </div>
-                  </>
-                )}
-              </div>
+                  </div>
+                </div>
+              </details>
 
               {/* Connectivity test button */}
               <div className="pt-1">
