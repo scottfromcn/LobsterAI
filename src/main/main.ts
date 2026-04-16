@@ -4187,6 +4187,20 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle(
+    'dialog:showMessageBox',
+    async (event, options: { message: string; type?: 'none' | 'info' | 'error' | 'question' | 'warning'; title?: string }) => {
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const { dialog } = await import('electron');
+      return dialog.showMessageBox(ownerWindow!, {
+        type: options.type || 'warning',
+        title: options.title || '',
+        message: options.message,
+        buttons: ['OK'],
+      });
+    }
+  );
+
+  ipcMain.handle(
     'dialog:saveInlineFile',
     async (
       _event,

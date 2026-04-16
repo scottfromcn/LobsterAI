@@ -441,8 +441,8 @@ export interface EmailMultiInstanceStatus {
 }
 
 export const DEFAULT_EMAIL_INSTANCE_CONFIG: Partial<EmailInstanceConfig> = {
-  enabled: true,
-  transport: 'imap',
+  enabled: false,
+  transport: 'ws',
   agentId: 'main',
   replyMode: 'complete',
   replyTo: 'sender',

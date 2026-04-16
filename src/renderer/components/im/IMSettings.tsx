@@ -1723,7 +1723,10 @@ const IMSettings: React.FC = () => {
                           dispatch(clearError());
                         }
                       } else {
-                        alert(i18nService.t('emailConnectivityFailAlert'));
+                        void window.electron.dialog.showMessageBox({
+                          type: 'warning',
+                          message: i18nService.t('emailConnectivityFailAlert'),
+                        });
                       }
                     } finally {
                       setEmailToggleLoading(null);
