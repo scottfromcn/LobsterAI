@@ -125,6 +125,7 @@ const IMSettings: React.FC = () => {
   const [togglingPlatform, setTogglingPlatform] = useState<Platform | null>(null);
   // Loading state for email instance toggle (stores instanceId being toggled on)
   const [emailToggleLoading, setEmailToggleLoading] = useState<string | null>(null);
+  const [emailDrafts, setEmailDrafts] = useState<Record<string, { allowFrom?: string; a2aAgentDomains?: string }>>({});
   // Track visibility of password fields (eye toggle)
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   // WeCom quick setup state
@@ -1821,14 +1822,20 @@ const IMSettings: React.FC = () => {
                     <label className={labelClass}>{i18nService.t('emailAllowFrom')}</label>
                     <input
                       type="text"
-                      value={(inst.allowFrom ?? ['*']).join(', ')}
-                      onChange={e => dispatch(setEmailInstanceConfig({
-                        instanceId: inst.instanceId,
-                        config: { allowFrom: e.target.value.split(',').map(s => s.trim()).filter(Boolean) },
-                      }))}
-                      onBlur={e => void imService.persistEmailInstanceConfig(inst.instanceId, {
-                        allowFrom: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
-                      })}
+                      value={emailDrafts[inst.instanceId]?.allowFrom ?? (inst.allowFrom ?? ['*']).join(', ')}
+                      onChange={e => setEmailDrafts(prev => ({ ...prev, [inst.instanceId]: { ...prev[inst.instanceId], allowFrom: e.target.value } }))}
+                      onFocus={() => {
+                        setEmailDrafts(prev => {
+                          if (prev[inst.instanceId]?.allowFrom !== undefined) return prev;
+                          return { ...prev, [inst.instanceId]: { ...prev[inst.instanceId], allowFrom: (inst.allowFrom ?? ['*']).join(', ') } };
+                        });
+                      }}
+                      onBlur={e => {
+                        const parsed = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+                        dispatch(setEmailInstanceConfig({ instanceId: inst.instanceId, config: { allowFrom: parsed } }));
+                        void imService.persistEmailInstanceConfig(inst.instanceId, { allowFrom: parsed });
+                        setEmailDrafts(prev => ({ ...prev, [inst.instanceId]: { ...prev[inst.instanceId], allowFrom: parsed.join(', ') } }));
+                      }}
                       placeholder={i18nService.t('emailAllowFromPlaceholder')}
                       className={inputClass}
                     />
@@ -1908,14 +1915,20 @@ const IMSettings: React.FC = () => {
                       <label className={labelClass}>{i18nService.t('emailA2aAgentDomains')}</label>
                       <input
                         type="text"
-                        value={(inst.a2aAgentDomains ?? []).join(', ')}
-                        onChange={e => dispatch(setEmailInstanceConfig({
-                          instanceId: inst.instanceId,
-                          config: { a2aAgentDomains: e.target.value.split(',').map(s => s.trim()).filter(Boolean) },
-                        }))}
-                        onBlur={e => void imService.persistEmailInstanceConfig(inst.instanceId, {
-                          a2aAgentDomains: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
-                        })}
+                        value={emailDrafts[inst.instanceId]?.a2aAgentDomains ?? (inst.a2aAgentDomains ?? []).join(', ')}
+                        onChange={e => setEmailDrafts(prev => ({ ...prev, [inst.instanceId]: { ...prev[inst.instanceId], a2aAgentDomains: e.target.value } }))}
+                        onFocus={() => {
+                          setEmailDrafts(prev => {
+                            if (prev[inst.instanceId]?.a2aAgentDomains !== undefined) return prev;
+                            return { ...prev, [inst.instanceId]: { ...prev[inst.instanceId], a2aAgentDomains: (inst.a2aAgentDomains ?? []).join(', ') } };
+                          });
+                        }}
+                        onBlur={e => {
+                          const parsed = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+                          dispatch(setEmailInstanceConfig({ instanceId: inst.instanceId, config: { a2aAgentDomains: parsed } }));
+                          void imService.persistEmailInstanceConfig(inst.instanceId, { a2aAgentDomains: parsed });
+                          setEmailDrafts(prev => ({ ...prev, [inst.instanceId]: { ...prev[inst.instanceId], a2aAgentDomains: parsed.join(', ') } }));
+                        }}
                         placeholder={i18nService.t('emailA2aAgentDomainsPlaceholder')}
                         className={inputClass}
                       />
