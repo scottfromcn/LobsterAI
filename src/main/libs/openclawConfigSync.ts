@@ -3,11 +3,10 @@ import fs from 'fs';
 import path from 'path';
 
 import { buildScheduledTaskEnginePrompt } from '../../scheduledTask/enginePrompt';
-import { PlatformRegistry } from '../../shared/platform';
 import { AuthType, OpenClawApi as OpenClawApiConst, OpenClawProviderId, ProviderName } from '../../shared/providers';
 import type { Agent, CoworkConfig, CoworkExecutionMode } from '../coworkStore';
 import type { DiscordOpenClawConfig, IMSettings, TelegramOpenClawConfig } from '../im/types';
-import type { DingTalkInstanceConfig, FeishuInstanceConfig, NeteaseBeeChanConfig, NimConfig, PopoOpenClawConfig, QQInstanceConfig, WecomOpenClawConfig, WeixinOpenClawConfig } from '../im/types';
+import type { DingTalkInstanceConfig, FeishuInstanceConfig, NeteaseBeeChanConfig, NimConfig, PopoOpenClawConfig, QQInstanceConfig, WecomInstanceConfig, WeixinOpenClawConfig } from '../im/types';
 import { OpenClawSessionKeepAlive } from '../openclawSessionPolicy/constants';
 import { buildOpenClawSessionConfig } from '../openclawSessionPolicy/store';
 import { getAllServerModelMetadata, resolveAllEnabledProviderConfigs, resolveAllProviderApiKeys, resolveRawApiConfig } from './claudeSettings';
@@ -22,7 +21,7 @@ import {
 } from './openclawAgentModels';
 import { parseChannelSessionKey } from './openclawChannelSessionSync';
 import type { OpenClawEngineManager } from './openclawEngineManager';
-import { hasBundledOpenClawExtension } from './openclawLocalExtensions';
+import { findThirdPartyExtensionsDir, hasBundledOpenClawExtension } from './openclawLocalExtensions';
 import { getOpenClawTokenProxyPort } from './openclawTokenProxy';
 
 export type McpBridgeConfig = {
@@ -47,6 +46,7 @@ const mapExecutionModeToSandboxMode = (mode: CoworkExecutionMode, isEnterprise: 
  * Also used by the runtime adapter's client-side timeout watchdog.
  */
 export const OPENCLAW_AGENT_TIMEOUT_SECONDS = 3600;
+const DINGTALK_OPENCLAW_CHANNEL = 'dingtalk-connector';
 
 function shouldUseOpenAIResponsesApi(providerName?: string, baseURL?: string): boolean {
   if (providerName !== ProviderName.OpenAI) return false;
@@ -705,7 +705,15 @@ export type OpenClawConfigSyncResult = {
   configPath: string;
   error?: string;
   agentsMdWarning?: string;
+  bindingsChanged?: boolean;
+  mcpBridgeConfigChanged?: boolean;
 };
+
+const buildStreamingModeConfig = (
+  mode: 'off' | 'partial' | 'block' | 'progress',
+): { mode: 'off' | 'partial' | 'block' | 'progress' } => ({
+  mode,
+});
 
 type OpenClawConfigSyncDeps = {
   engineManager: OpenClawEngineManager;
@@ -717,13 +725,14 @@ type OpenClawConfigSyncDeps = {
   getDingTalkInstances: () => DingTalkInstanceConfig[];
   getFeishuInstances: () => FeishuInstanceConfig[];
   getQQInstances: () => QQInstanceConfig[];
-  getWecomConfig: () => WecomOpenClawConfig | null;
+  getWecomInstances: () => WecomInstanceConfig[];
   getPopoConfig: () => PopoOpenClawConfig | null;
   getNimConfig: () => NimConfig | null;
   getNeteaseBeeChanConfig: () => NeteaseBeeChanConfig | null;
   getWeixinConfig: () => WeixinOpenClawConfig | null;
   getIMSettings?: () => IMSettings | null;
   getMcpBridgeConfig?: () => McpBridgeConfig | null;
+  getMcpBridgeSecret?: () => string;
   getSkillsList?: () => Array<{ id: string; enabled: boolean }>;
   getAgents?: () => Agent[];
 };
@@ -738,15 +747,18 @@ export class OpenClawConfigSync {
   private readonly getDingTalkInstances: () => DingTalkInstanceConfig[];
   private readonly getFeishuInstances: () => FeishuInstanceConfig[];
   private readonly getQQInstances: () => QQInstanceConfig[];
-  private readonly getWecomConfig: () => WecomOpenClawConfig | null;
+  private readonly getWecomInstances: () => WecomInstanceConfig[];
   private readonly getPopoConfig: () => PopoOpenClawConfig | null;
   private readonly getNimConfig: () => NimConfig | null;
   private readonly getNeteaseBeeChanConfig: () => NeteaseBeeChanConfig | null;
   private readonly getWeixinConfig: () => WeixinOpenClawConfig | null;
   private readonly getIMSettings?: () => IMSettings | null;
   private readonly getMcpBridgeConfig?: () => McpBridgeConfig | null;
+  private readonly getMcpBridgeSecret?: () => string;
   private readonly getSkillsList?: () => Array<{ id: string; enabled: boolean }>;
   private readonly getAgents?: () => Agent[];
+  private previousBindingsJson?: string;
+  private currentBindingsObj: { bindings?: Array<Record<string, unknown>> } = {};
 
   constructor(deps: OpenClawConfigSyncDeps) {
     this.engineManager = deps.engineManager;
@@ -758,13 +770,14 @@ export class OpenClawConfigSync {
     this.getDingTalkInstances = deps.getDingTalkInstances;
     this.getFeishuInstances = deps.getFeishuInstances;
     this.getQQInstances = deps.getQQInstances;
-    this.getWecomConfig = deps.getWecomConfig;
+    this.getWecomInstances = deps.getWecomInstances;
     this.getPopoConfig = deps.getPopoConfig;
     this.getNimConfig = deps.getNimConfig;
     this.getNeteaseBeeChanConfig = deps.getNeteaseBeeChanConfig;
     this.getWeixinConfig = deps.getWeixinConfig;
     this.getIMSettings = deps.getIMSettings;
     this.getMcpBridgeConfig = deps.getMcpBridgeConfig;
+    this.getMcpBridgeSecret = deps.getMcpBridgeSecret;
     this.getSkillsList = deps.getSkillsList;
     this.getAgents = deps.getAgents;
   }
@@ -906,12 +919,26 @@ export class OpenClawConfigSync {
     const hasMcpBridgePlugin = isBundledPluginAvailable('mcp-bridge');
     const hasAskUserPlugin = isBundledPluginAvailable('ask-user-question');
 
-    // Detect if any provider uses Qwen/Aliyun DashScope URLs — OpenClaw auto-injects
-    // qwen-portal-auth plugin for these, so we must declare it to prevent config diff loops.
-    const hasQwenProvider = Object.values(allProvidersMap).some((p) => {
-      const url = (p as { baseUrl?: string }).baseUrl || '';
-      return url.includes('dashscope.aliyuncs.com') || url.includes('aliyuncs.com/compatible-mode');
-    });
+    // Read existing config to preserve fields that the OpenClaw runtime
+    // auto-injects at startup.  Without this, every configSync cycle removes
+    // them, the gateway detects the diff, and restarts — creating a restart
+    // loop.  We preserve ALL existing gateway fields and plugin entries rather
+    // than whitelisting specific ones, so new auto-injected fields in future
+    // OpenClaw versions don't cause regressions.
+    // See: openclaw/openclaw#58678, #33310, #61613
+    let existingGateway: Record<string, unknown> = {};
+    let existingPlugins: Record<string, unknown> = {};
+    try {
+      const existing = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      existingGateway = (existing.gateway ?? {}) as Record<string, unknown>;
+      existingPlugins = (existing.plugins ?? {}) as Record<string, unknown>;
+    } catch {
+      // First run or corrupt file — nothing to preserve.
+    }
+    const existingPluginEntries = (existingPlugins.entries ?? {}) as Record<string, unknown>;
+    console.log('[GW-RESTART-DIAG] existingGateway keys:', Object.keys(existingGateway).sort().join(',') || '(empty)');
+    console.log('[GW-RESTART-DIAG] existingPlugins keys:', Object.keys(existingPlugins).sort().join(',') || '(empty)');
+    console.log('[GW-RESTART-DIAG] existingPluginEntries keys:', Object.keys(existingPluginEntries).sort().join(',') || '(empty)');
 
     const dingTalkInstances = this.getDingTalkInstances();
     // DingTalk runs through OpenClaw plugin but still needs the gateway HTTP endpoint (chatCompletions)
@@ -921,7 +948,7 @@ export class OpenClawConfigSync {
 
     const qqInstances = this.getQQInstances();
 
-    const wecomConfig = this.getWecomConfig();
+    const wecomInstances = this.getWecomInstances();
 
     const popoConfig = this.getPopoConfig();
 
@@ -933,9 +960,28 @@ export class OpenClawConfigSync {
 
     const hasAnyChannel = hasDingTalkOpenClaw;
 
+    // Pre-compute bindings and detect changes so we can signal a hard restart
+    // when only bindings change (channel plugins don't hot-reload bindings).
+    this.currentBindingsObj = this.buildBindings();
+    const bindingsJson = JSON.stringify(this.currentBindingsObj);
+    const bindingsChanged = this.previousBindingsJson !== undefined
+      && bindingsJson !== this.previousBindingsJson;
+    this.previousBindingsJson = bindingsJson;
+
     const managedConfig: Record<string, unknown> = {
       gateway: {
+        // Preserve ALL existing gateway fields so runtime-seeded values
+        // survive config rewrites.  Our managed fields below override
+        // any stale values.
+        ...existingGateway,
         mode: 'local',
+        // Explicitly declare auth and tailscale to match the runtime
+        // in-memory state.  The gateway sets auth.mode='token' when
+        // --token / OPENCLAW_GATEWAY_TOKEN is provided.  Without
+        // matching values here, ANY file change triggers
+        // "config change requires gateway restart (gateway.auth.token)".
+        auth: { mode: 'token', token: '${OPENCLAW_GATEWAY_TOKEN}' },
+        tailscale: { mode: 'off' },
         ...(hasAnyChannel ? {
           http: {
             endpoints: {
@@ -959,9 +1005,9 @@ export class OpenClawConfigSync {
           },
           ...(workspaceDir ? { workspace: path.resolve(workspaceDir) } : {}),
         },
-        ...this.buildAgentsList(primaryModel),
+        ...this.buildAgentsList(primaryModel, this.engineManager.getStateDir()),
       },
-      ...this.buildBindings(),
+      ...this.currentBindingsObj,
       session: this.buildSessionConfig(),
       commands: {
         ownerAllowFrom: MANAGED_OWNER_ALLOW_FROM,
@@ -989,22 +1035,41 @@ export class OpenClawConfigSync {
       },
       cron: {
         enabled: true,
+        skipMissedJobs: coworkConfig.skipMissedJobs === true,
         maxConcurrentRuns: 3,
         sessionRetention: '7d',
-        skipMissedJobs: coworkConfig.skipMissedJobs ?? false
       },
       ...((() => {
+        // Remove known-stale plugin entries that no longer ship with the
+        // runtime.  These ghost entries cause harmless but noisy "plugin
+        // not found" warnings on every gateway startup.
+        const knownStalePluginIds = ['dingtalk', 'openclaw-nim-channel', 'qwen-portal-auth', 'openclaw-qqbot'];
+        const transientPluginIds = [
+          ...(preinstalledPluginIds.includes('openclaw-lark') ? ['feishu'] : []),
+        ];
+        const cleanedExistingEntries = Object.fromEntries(
+          Object.entries(existingPluginEntries).filter(([id]) => (
+            !knownStalePluginIds.includes(id) && !transientPluginIds.includes(id)
+          )),
+        );
+        const qqbotPluginEnabled = qqInstances.some(i => i.enabled && i.appId);
+
         const pluginEntries: Record<string, unknown> = {
+          // Preserve ALL existing plugin entries so runtime auto-injected
+          // plugins (moonshot, minimax, volcengine, browser, etc.) survive
+          // config rewrites.  Our managed entries below override stale values.
+          ...cleanedExistingEntries,
+          qqbot: { enabled: qqbotPluginEnabled },
           ...Object.fromEntries(
             preinstalledPluginIds.map((id) => {
               // Sync plugin enabled state with the corresponding channel config.
               // When a channel is disabled in the UI, its plugin must also be
               // disabled so OpenClaw doesn't load it at all.
               const pluginEnabled = (() => {
-                if (id === 'dingtalk') return dingTalkInstances.some(i => i.enabled && i.clientId);
-                if (id === 'feishu-openclaw-plugin') return feishuInstances.some(i => i.enabled && i.appId);
+                if (id === DINGTALK_OPENCLAW_CHANNEL || id === 'dingtalk') return dingTalkInstances.some(i => i.enabled && i.clientId);
+                if (id === 'openclaw-lark') return feishuInstances.some(i => i.enabled && i.appId);
                 if (id === 'openclaw-qqbot') return qqInstances.some(i => i.enabled && i.appId);
-                if (id === 'wecom-openclaw-plugin') return !!(wecomConfig?.enabled && wecomConfig.botId);
+                if (id === 'wecom-openclaw-plugin') return wecomInstances.some(i => i.enabled && i.botId);
                 if (id === 'moltbot-popo') return !!(popoConfig?.enabled && popoConfig.appKey);
                 if (id === 'nim') return !!(nimConfig?.enabled && nimConfig.appKey && nimConfig.account && nimConfig.token);
                 if (id === 'openclaw-netease-bee') return !!(neteaseBeeChanConfig?.enabled && neteaseBeeChanConfig.clientId && neteaseBeeChanConfig.secret);
@@ -1014,25 +1079,38 @@ export class OpenClawConfigSync {
               return [id, { enabled: pluginEnabled }];
             }),
           ),
-          ...(preinstalledPluginIds.includes('feishu-openclaw-plugin')
-            ? { feishu: { enabled: false } }
-            : {}),
           ...(hasMcpBridgePlugin
             ? { 'mcp-bridge': { enabled: true } }
             : {}),
           ...(hasAskUserPlugin
             ? { 'ask-user-question': { enabled: true } }
             : {}),
-          // OpenClaw auto-injects qwen-portal-auth for Qwen/DashScope URLs; declare it
-          // explicitly so configSync doesn't remove it and trigger restart loops.
-          ...(hasQwenProvider
-            ? { 'qwen-portal-auth': { enabled: true } }
-            : {}),
+          // Disable acpx (ACP agent runtime) — LobsterAI does not use ACP and
+          // the embedded probe adds ~11s to gateway startup while it waits for
+          // a process that always fails.  See openclaw/openclaw#62588.
+          'acpx': { enabled: false },
         };
 
         return Object.keys(pluginEntries).length > 0
           ? {
               plugins: {
+                // Preserve existing plugins fields (load, deny, etc.) so
+                // runtime-seeded values survive config rewrites and don't
+                // cause a plugins diff → gateway restart.
+                ...existingPlugins,
+                // Third-party plugins live in a separate `extensions/` dir (not
+                // `dist/extensions/`) and need `load.paths` so the gateway discovers
+                // them with origin="config", bypassing the bundled-channel-entry
+                // contract check.  See openclaw/openclaw#60196.
+                ...((() => {
+                  const thirdPartyDir = findThirdPartyExtensionsDir();
+                  return thirdPartyDir ? { load: { paths: [thirdPartyDir] } } : {};
+                })()),
+                // Deny list cleared — unused bundled plugins are physically removed
+                // from dist/extensions/ at build time (see prune-openclaw-runtime.cjs).
+                // OpenClaw validates deny IDs against discovered plugins, so denying
+                // a removed plugin causes "Config invalid: plugin not found" errors.
+                deny: [],
                 entries: pluginEntries,
               },
             }
@@ -1043,6 +1121,7 @@ export class OpenClawConfigSync {
     // Sync MCP Bridge config into the plugin's own config section
     // (root-level keys are rejected by OpenClaw's strict schema validation)
     const mcpBridgeCfg = this.getMcpBridgeConfig?.();
+    console.log(`[OpenClawConfigSync] getMcpBridgeConfig: callbackUrl=${mcpBridgeCfg?.callbackUrl ?? 'null'}, tools=${mcpBridgeCfg?.tools?.length ?? 0}`);
     if (hasMcpBridgePlugin && mcpBridgeCfg && mcpBridgeCfg.tools.length > 0 && managedConfig.plugins) {
       const plugins = managedConfig.plugins as Record<string, unknown>;
       const entries = plugins.entries as Record<string, Record<string, unknown>>;
@@ -1093,7 +1172,7 @@ export class OpenClawConfigSync {
         historyLimit: tgConfig.historyLimit || 50,
         replyToMode: tgConfig.replyToMode || 'off',
         linkPreview: tgConfig.linkPreview ?? true,
-        streaming: tgConfig.streaming || 'off',
+        streaming: buildStreamingModeConfig(tgConfig.streaming || 'off'),
         mediaMaxMb: tgConfig.mediaMaxMb || 5,
       };
       if (tgConfig.proxy) {
@@ -1147,7 +1226,7 @@ export class OpenClawConfigSync {
           return Object.keys(guilds).length > 0 ? guilds : { '*': { requireMention: true } };
         })(),
         historyLimit: dcConfig.historyLimit || 50,
-        streaming: dcConfig.streaming || 'off',
+        streaming: buildStreamingModeConfig(dcConfig.streaming || 'off'),
         mediaMaxMb: dcConfig.mediaMaxMb || 25,
       };
       if (dcConfig.proxy) {
@@ -1156,7 +1235,7 @@ export class OpenClawConfigSync {
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), discord: discordChannel };
     }
 
-    // Sync Feishu OpenClaw channel config (via feishu-openclaw-plugin) — multi-instance via accounts
+    // Sync Feishu OpenClaw channel config (via @larksuite/openclaw-lark) — multi-instance via accounts
     const enabledFeishuInstances = feishuInstances.filter(i => i.enabled && i.appId);
     if (enabledFeishuInstances.length > 0) {
       const buildFeishuAccountConfig = (inst: (typeof enabledFeishuInstances)[0], secretEnvVar: string): Record<string, unknown> => ({
@@ -1203,12 +1282,14 @@ export class OpenClawConfigSync {
     // Sync DingTalk OpenClaw channel config (via dingtalk-connector plugin) — multi-instance via accounts
     const enabledDingTalkInstances = dingTalkInstances.filter(i => i.enabled && i.clientId);
     if (enabledDingTalkInstances.length > 0) {
-      const gatewayToken = this.engineManager.getGatewayToken();
       const buildDingTalkAccountConfig = (inst: (typeof enabledDingTalkInstances)[0], secretEnvVar: string): Record<string, unknown> => ({
         enabled: true,
         name: inst.instanceName,
         clientId: inst.clientId,
         clientSecret: `\${${secretEnvVar}}`,
+        // v3.5.x schema: dmPolicy/groupPolicy/allowFrom are valid; sessionTimeout/
+        // separateSessionByConversation/groupSessionScope/sharedMemoryAcrossConversations/
+        // gatewayBaseUrl were LobsterAI-specific and are not in the plugin schema.
         dmPolicy: inst.dmPolicy || 'open',
         allowFrom: (() => {
           const ids = inst.allowFrom?.length ? [...inst.allowFrom] : [];
@@ -1216,11 +1297,6 @@ export class OpenClawConfigSync {
           return ids;
         })(),
         groupPolicy: inst.groupPolicy || 'open',
-        sessionTimeout: inst.sessionTimeout ?? 1800000,
-        separateSessionByConversation: inst.separateSessionByConversation ?? true,
-        groupSessionScope: inst.groupSessionScope || 'group',
-        sharedMemoryAcrossConversations: inst.sharedMemoryAcrossConversations ?? false,
-        ...(inst.gatewayBaseUrl ? { gatewayBaseUrl: inst.gatewayBaseUrl } : {}),
       });
 
       // All instances go into `accounts` dict
@@ -1232,12 +1308,8 @@ export class OpenClawConfigSync {
       }
 
       const dingtalkChannel: Record<string, unknown> = { accounts };
-      // gatewayToken is shared (not per-instance)
-      if (gatewayToken) {
-        dingtalkChannel.gatewayToken = '${LOBSTER_DINGTALK_GW_TOKEN}';
-      }
 
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), 'dingtalk': dingtalkChannel };
+      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), [DINGTALK_OPENCLAW_CHANNEL]: dingtalkChannel };
     }
 
     // Sync QQ OpenClaw channel config (via qqbot plugin) — multi-instance via accounts
@@ -1249,19 +1321,13 @@ export class OpenClawConfigSync {
           name: inst.instanceName,
           appId: inst.appId,
           clientSecret: `\${${secretEnvVar}}`,
-          dmPolicy: inst.dmPolicy || 'open',
+          // v2026.4.8 schema removed dmPolicy/groupPolicy/groupAllowFrom/historyLimit.
+          // Only allowFrom and markdownSupport remain as valid account properties.
           allowFrom: (() => {
             const ids = inst.allowFrom?.length ? [...inst.allowFrom] : [];
             if (inst.dmPolicy === 'open' && !ids.includes('*')) ids.push('*');
             return ids;
           })(),
-          groupPolicy: inst.groupPolicy || 'open',
-          groupAllowFrom: (() => {
-            const ids = inst.groupAllowFrom?.length ? [...inst.groupAllowFrom] : [];
-            if (inst.groupPolicy === 'open' && !ids.includes('*')) ids.push('*');
-            return ids;
-          })(),
-          historyLimit: inst.historyLimit || 50,
           markdownSupport: inst.markdownSupport ?? true,
         };
         if (inst.imageServerBaseUrl) {
@@ -1281,27 +1347,34 @@ export class OpenClawConfigSync {
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), qqbot: { accounts } };
     }
 
-    // Sync WeCom OpenClaw channel config (via wecom-openclaw-plugin)
-    if (wecomConfig?.enabled && wecomConfig.botId) {
-      const wecomChannel: Record<string, unknown> = {
-        enabled: true,
-        botId: wecomConfig.botId,
-        secret: '${LOBSTER_WECOM_SECRET}',
-        dmPolicy: wecomConfig.dmPolicy || 'open',
-        allowFrom: (() => {
-          const ids = wecomConfig.allowFrom?.length ? [...wecomConfig.allowFrom] : [];
-          if (wecomConfig.dmPolicy === 'open' && !ids.includes('*')) ids.push('*');
-          return ids;
-        })(),
-        groupPolicy: wecomConfig.groupPolicy || 'open',
-        groupAllowFrom: (() => {
-          const ids = wecomConfig.groupAllowFrom?.length ? [...wecomConfig.groupAllowFrom] : [];
-          if (wecomConfig.groupPolicy === 'open' && !ids.includes('*')) ids.push('*');
-          return ids;
-        })(),
-        sendThinkingMessage: wecomConfig.sendThinkingMessage ?? true,
-      };
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), wecom: wecomChannel };
+    // Sync WeCom OpenClaw channel config (via wecom-openclaw-plugin) — multi-instance via accounts
+    const enabledWecomInstances = wecomInstances.filter(i => i.enabled && i.botId);
+    if (enabledWecomInstances.length > 0) {
+      const accounts: Record<string, unknown> = {};
+      for (let idx = 0; idx < enabledWecomInstances.length; idx++) {
+        const inst = enabledWecomInstances[idx];
+        const secretVar = idx === 0 ? 'LOBSTER_WECOM_SECRET' : `LOBSTER_WECOM_SECRET_${idx}`;
+        accounts[inst.instanceId.slice(0, 8)] = {
+          enabled: true,
+          name: inst.instanceName,
+          botId: inst.botId,
+          secret: `\${${secretVar}}`,
+          dmPolicy: inst.dmPolicy || 'open',
+          allowFrom: (() => {
+            const ids = inst.allowFrom?.length ? [...inst.allowFrom] : [];
+            if (inst.dmPolicy === 'open' && !ids.includes('*')) ids.push('*');
+            return ids;
+          })(),
+          groupPolicy: inst.groupPolicy || 'open',
+          groupAllowFrom: (() => {
+            const ids = inst.groupAllowFrom?.length ? [...inst.groupAllowFrom] : [];
+            if (inst.groupPolicy === 'open' && !ids.includes('*')) ids.push('*');
+            return ids;
+          })(),
+          sendThinkingMessage: inst.sendThinkingMessage ?? true,
+        };
+      }
+      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), wecom: { accounts } };
     }
 
     // Sync POPO OpenClaw channel config (via moltbot-popo plugin)
@@ -1381,39 +1454,14 @@ export class OpenClawConfigSync {
       const weixinChannelEnabled = !!(weixinConfig?.enabled);
       const weixinChannel: Record<string, unknown> = {
         enabled: weixinChannelEnabled,
-        ...(weixinConfig?.accountId ? { accountId: weixinConfig.accountId } : {}),
+        dmPolicy: weixinConfig?.dmPolicy || 'open',
+        allowFrom: (() => {
+          const ids = weixinConfig?.allowFrom?.length ? [...weixinConfig.allowFrom] : [];
+          if ((weixinConfig?.dmPolicy || 'open') === 'open' && !ids.includes('*')) ids.push('*');
+          return ids;
+        })(),
       };
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), 'openclaw-weixin': weixinChannel };
-    }
-
-    // Inject _agentBinding into channel configs that have a non-main binding,
-    // forcing those channels to restart when the binding changes.  OpenClaw
-    // channel plugins capture their config at startup and never refresh it,
-    // so bindings-only config changes (kind: "none" in the reload plan) are
-    // invisible to running plugins.  By touching the channel config we trigger
-    // a "channels.*" diff path which forces the plugin to restart.
-    const platformBindingsForSentinel = this.getIMSettings?.()?.platformAgentBindings;
-    if (platformBindingsForSentinel) {
-      const channels = (managedConfig.channels ?? {}) as Record<string, Record<string, unknown>>;
-      for (const channelKey of Object.keys(channels)) {
-        if (!channels[channelKey] || typeof channels[channelKey] !== 'object') continue;
-        const platformKey = PlatformRegistry.platformOfChannel(channelKey);
-        if (!platformKey) continue;
-        // Collect all bindings for this platform (platform-level + per-instance)
-        const bindingValues: string[] = [];
-        if (platformBindingsForSentinel[platformKey] && platformBindingsForSentinel[platformKey] !== 'main') {
-          bindingValues.push(platformBindingsForSentinel[platformKey]);
-        }
-        const prefix = `${platformKey}:`;
-        for (const key of Object.keys(platformBindingsForSentinel)) {
-          if (key.startsWith(prefix) && platformBindingsForSentinel[key] !== 'main') {
-            bindingValues.push(`${key}=${platformBindingsForSentinel[key]}`);
-          }
-        }
-        if (bindingValues.length > 0) {
-          channels[channelKey]._agentBinding = bindingValues.join(',');
-        }
-      }
     }
 
     const nextContent = `${JSON.stringify(managedConfig, null, 2)}\n`;
@@ -1430,7 +1478,59 @@ export class OpenClawConfigSync {
 
     const configChanged = currentContent !== nextContent;
 
+    // Detect mcp-bridge config changes (callbackUrl, tools) separately.
+    // Even when the overall plugins section appears "UNCHANGED" in the
+    // diagnostic, the mcp-bridge sub-config may have changed — and that
+    // requires a hard gateway restart because the gateway pins its config
+    // snapshot at startup.
+    let mcpBridgeConfigChanged = false;
+    try {
+      const currentObj = currentContent ? JSON.parse(currentContent) : {};
+      const nextObj = JSON.parse(nextContent);
+      const curMcpBridge = currentObj?.plugins?.entries?.['mcp-bridge'];
+      const nxtMcpBridge = nextObj?.plugins?.entries?.['mcp-bridge'];
+      const curCallbackUrl = curMcpBridge?.config?.callbackUrl;
+      const nxtCallbackUrl = nxtMcpBridge?.config?.callbackUrl;
+      const curToolNames = (curMcpBridge?.config?.tools as Array<{ name?: string }> | undefined)
+        ?.map((t) => t.name).sort().join(',') ?? '';
+      const nxtToolNames = (nxtMcpBridge?.config?.tools as Array<{ name?: string }> | undefined)
+        ?.map((t) => t.name).sort().join(',') ?? '';
+      mcpBridgeConfigChanged = curCallbackUrl !== nxtCallbackUrl || curToolNames !== nxtToolNames;
+      if (mcpBridgeConfigChanged) {
+        console.log(`[GW-RESTART-DIAG] mcp-bridge config CHANGED: callbackUrl ${curCallbackUrl ?? 'null'} → ${nxtCallbackUrl ?? 'null'}, tools ${curToolNames.split(',').length} → ${nxtToolNames.split(',').length}`);
+      }
+    } catch { /* ignore parse errors */ }
+
     if (configChanged) {
+      // Diagnostic: diff gateway and plugins sections to identify what triggers OpenClaw restart
+      try {
+        const currentObj = currentContent ? JSON.parse(currentContent) : {};
+        const nextObj = JSON.parse(nextContent);
+        const curGw = JSON.stringify(currentObj.gateway ?? {});
+        const nxtGw = JSON.stringify(nextObj.gateway ?? {});
+        const curPl = JSON.stringify(currentObj.plugins ?? {});
+        const nxtPl = JSON.stringify(nextObj.plugins ?? {});
+        if (curGw !== nxtGw) {
+          console.log('[GW-RESTART-DIAG] gateway DIFF:');
+          console.log('[GW-RESTART-DIAG]   old gateway keys:', Object.keys(currentObj.gateway ?? {}).sort().join(','));
+          console.log('[GW-RESTART-DIAG]   new gateway keys:', Object.keys(nextObj.gateway ?? {}).sort().join(','));
+          console.log('[GW-RESTART-DIAG]   old gateway:', curGw.slice(0, 500));
+          console.log('[GW-RESTART-DIAG]   new gateway:', nxtGw.slice(0, 500));
+        } else {
+          console.log('[GW-RESTART-DIAG] gateway section UNCHANGED');
+        }
+        if (curPl !== nxtPl) {
+          console.log('[GW-RESTART-DIAG] plugins DIFF:');
+          console.log('[GW-RESTART-DIAG]   old plugin entry keys:', Object.keys((currentObj.plugins?.entries) ?? {}).sort().join(','));
+          console.log('[GW-RESTART-DIAG]   new plugin entry keys:', Object.keys((nextObj.plugins?.entries) ?? {}).sort().join(','));
+        } else {
+          console.log('[GW-RESTART-DIAG] plugins section UNCHANGED');
+        }
+        // Check which top-level keys actually changed
+        const allKeys = new Set([...Object.keys(currentObj), ...Object.keys(nextObj)]);
+        const changedKeys = [...allKeys].filter(k => JSON.stringify(currentObj[k]) !== JSON.stringify(nextObj[k]));
+        console.log('[GW-RESTART-DIAG] top-level changed keys:', changedKeys.join(',') || '(none)');
+      } catch { /* ignore parse errors in diag */ }
       try {
         ensureDir(path.dirname(configPath));
         const tmpPath = `${configPath}.tmp-${Date.now()}`;
@@ -1467,6 +1567,8 @@ export class OpenClawConfigSync {
       ok: true,
       changed: configChanged || sessionStoreChanged,
       configPath,
+      ...(bindingsChanged ? { bindingsChanged } : {}),
+      ...(mcpBridgeConfigChanged ? { mcpBridgeConfigChanged } : {}),
       ...(agentsMdWarning ? { agentsMdWarning } : {}),
     };
   }
@@ -1497,8 +1599,11 @@ export class OpenClawConfigSync {
 
     // MCP Bridge Secret — always set so stale openclaw.json with
     // ${LOBSTER_MCP_BRIDGE_SECRET} placeholder doesn't crash the gateway.
+    // Prefer getMcpBridgeSecret() which is available immediately (eagerly
+    // generated at module load), over getMcpBridgeConfig() which requires
+    // the full McpBridgeServer to be started.
     const mcpBridgeCfg = this.getMcpBridgeConfig?.();
-    env.LOBSTER_MCP_BRIDGE_SECRET = mcpBridgeCfg?.secret || 'unconfigured';
+    env.LOBSTER_MCP_BRIDGE_SECRET = this.getMcpBridgeSecret?.() || mcpBridgeCfg?.secret || 'unconfigured';
 
     // Telegram
     const tgConfig = this.getTelegramOpenClawConfig?.();
@@ -1553,10 +1658,15 @@ export class OpenClawConfigSync {
       }
     }
 
-    // WeCom
-    const wecomConfig = this.getWecomConfig();
-    if (wecomConfig?.enabled && wecomConfig.secret) {
-      env.LOBSTER_WECOM_SECRET = wecomConfig.secret;
+    // WeCom — per-instance secrets (must match sync() indexing: enabled instances only)
+    const wecomInstances = this.getWecomInstances();
+    const enabledWecom = wecomInstances.filter(i => i.enabled && i.secret);
+    for (let idx = 0; idx < enabledWecom.length; idx++) {
+      if (idx === 0) {
+        env.LOBSTER_WECOM_SECRET = enabledWecom[idx].secret;
+      } else {
+        env[`LOBSTER_WECOM_SECRET_${idx}`] = enabledWecom[idx].secret;
+      }
     }
 
     // POPO
@@ -1578,6 +1688,13 @@ export class OpenClawConfigSync {
     if (nimConfig?.enabled && nimConfig.token) {
       env.LOBSTER_NIM_TOKEN = nimConfig.token;
     }
+
+    const D = '[GW-RESTART-DIAG]';
+    const keysSummary = Object.keys(env).sort().map(k => {
+      const v = env[k];
+      return `${k}=${v.length > 16 ? v.slice(0, 12) + '…(' + v.length + ')' : v}`;
+    });
+    console.log(`${D} collectSecretEnvVars: ${Object.keys(env).length} keys: ${keysSummary.join(', ')}`);
 
     return env;
   }
@@ -1904,7 +2021,7 @@ export class OpenClawConfigSync {
    * Per-agent `identity` (name, emoji) is set from the agent database so
    * OpenClaw picks it up natively.
    */
-  private buildAgentsList(defaultPrimaryModel: string): { list?: Array<Record<string, unknown>> } {
+  private buildAgentsList(defaultPrimaryModel: string, stateDir?: string): { list?: Array<Record<string, unknown>> } {
     const agents = this.getAgents?.() ?? [];
     const mainAgent = agents.find((agent) => agent.id === 'main');
 
@@ -1921,6 +2038,7 @@ export class OpenClawConfigSync {
       ...buildManagedAgentEntries({
         agents,
         fallbackPrimaryModel: defaultPrimaryModel,
+        stateDir,
       }),
     ];
 
@@ -1945,9 +2063,10 @@ export class OpenClawConfigSync {
 
     // Handle per-instance bindings for multi-instance platforms
     const multiInstanceChannels: Record<string, { channel: string; getInstances: () => Array<{ instanceId: string; enabled: boolean }> }> = {
-      dingtalk: { channel: 'dingtalk', getInstances: () => this.getDingTalkInstances() },
+      dingtalk: { channel: DINGTALK_OPENCLAW_CHANNEL, getInstances: () => this.getDingTalkInstances() },
       feishu: { channel: 'feishu', getInstances: () => this.getFeishuInstances() },
       qq: { channel: 'qqbot', getInstances: () => this.getQQInstances() },
+      wecom: { channel: 'wecom', getInstances: () => this.getWecomInstances() },
     };
 
     for (const [platform, { channel, getInstances }] of Object.entries(multiInstanceChannels)) {
@@ -1980,7 +2099,6 @@ export class OpenClawConfigSync {
     const singleInstanceChannels: Array<{ getter: () => { enabled: boolean } | null; channel: string; platform: string }> = [
       { getter: () => this.getTelegramOpenClawConfig?.() ?? null, channel: 'telegram', platform: 'telegram' },
       { getter: () => this.getDiscordOpenClawConfig?.() ?? null, channel: 'discord', platform: 'discord' },
-      { getter: () => this.getWecomConfig(), channel: 'wecom', platform: 'wecom' },
       { getter: () => this.getPopoConfig(), channel: 'moltbot-popo', platform: 'popo' },
       { getter: () => this.getNimConfig(), channel: 'nim', platform: 'nim' },
       { getter: () => this.getNeteaseBeeChanConfig(), channel: 'netease-bee', platform: 'netease-bee' },

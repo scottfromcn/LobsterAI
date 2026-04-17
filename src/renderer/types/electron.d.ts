@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type { OpenClawSessionPatch } from '../../common/openclawSession';
 interface ApiResponse {
   ok: boolean;
   status: number;
@@ -24,6 +25,7 @@ interface CoworkSession {
   pinned: boolean;
   cwd: string;
   systemPrompt: string;
+  modelOverride: string;
   executionMode: 'auto' | 'local' | 'sandbox';
   activeSkillIds: string[];
   agentId: string;
@@ -54,7 +56,7 @@ interface CoworkConfig {
   workingDirectory: string;
   systemPrompt: string;
   executionMode: 'auto' | 'local' | 'sandbox';
-  agentEngine: 'openclaw' | 'yd_cowork';
+  agentEngine: 'openclaw';
   memoryEnabled: boolean;
   memoryImplicitUpdateEnabled: boolean;
   memoryLlmJudgeEnabled: boolean;
@@ -326,6 +328,12 @@ interface IElectronAPI {
       get: () => Promise<{ success: boolean; config?: OpenClawSessionPolicyConfig; error?: string }>;
       set: (config: OpenClawSessionPolicyConfig) => Promise<{ success: boolean; config?: OpenClawSessionPolicyConfig; error?: string }>;
     };
+    session: {
+      patch: (options: {
+        sessionId: string;
+        patch: OpenClawSessionPatch;
+      }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    };
   };
   ipcRenderer: {
     send: (channel: string, ...args: any[]) => void;
@@ -449,6 +457,11 @@ interface IElectronAPI {
     getOpenClawConfigSchema: () => Promise<{ success: boolean; result?: { schema: Record<string, unknown>; uiHints: Record<string, Record<string, unknown>> }; error?: string }>;
     weixinQrLoginStart: () => Promise<{ success: boolean; qrDataUrl?: string; message: string; sessionKey?: string }>;
     weixinQrLoginWait: (accountId?: string) => Promise<{ success: boolean; connected: boolean; message: string; accountId?: string }>;
+
+    // POPO QR login
+    popoQrLoginStart: () => Promise<{ success: boolean; qrUrl?: string; taskToken?: string; timeoutMs?: number; message?: string }>;
+    popoQrLoginPoll: (taskToken: string) => Promise<{ success: boolean; appKey?: string; appSecret?: string; aesKey?: string; message: string }>;
+
     listPairingRequests: (platform: string) => Promise<{
       success: boolean;
       requests: Array<{ id: string; code: string; createdAt: string; lastSeenAt: string; meta?: Record<string, string> }>;
@@ -466,6 +479,9 @@ interface IElectronAPI {
     addDingTalkInstance: (name: string) => Promise<{ success: boolean; instance?: DingTalkInstanceConfig; error?: string }>;
     deleteDingTalkInstance: (instanceId: string) => Promise<{ success: boolean; error?: string }>;
     setDingTalkInstanceConfig: (instanceId: string, config: any, options?: { syncGateway?: boolean }) => Promise<{ success: boolean; error?: string }>;
+    addWecomInstance: (name: string) => Promise<{ success: boolean; instance?: WecomInstanceConfig; error?: string }>;
+    deleteWecomInstance: (instanceId: string) => Promise<{ success: boolean; error?: string }>;
+    setWecomInstanceConfig: (instanceId: string, config: any, options?: { syncGateway?: boolean }) => Promise<{ success: boolean; error?: string }>;
     onStatusChange: (callback: (status: IMGatewayStatus) => void) => () => void;
     onMessageReceived: (callback: (message: IMMessage) => void) => () => void;
   };
@@ -591,7 +607,7 @@ interface IMGatewayConfig {
   discord: DiscordOpenClawConfig;
   nim: NimConfig;
   'netease-bee': NeteaseBeeChanConfig;
-  wecom: WecomConfig;
+  wecom: WecomMultiInstanceConfig;
   popo: PopoOpenClawConfig;
   weixin: WeixinOpenClawConfig;
   settings: IMSettings;
@@ -814,6 +830,24 @@ interface WecomConfig {
   debug: boolean;
 }
 
+interface WecomInstanceConfig extends WecomConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+interface WecomMultiInstanceConfig {
+  instances: WecomInstanceConfig[];
+}
+
+interface WecomInstanceStatus extends WecomGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+interface WecomMultiInstanceStatus {
+  instances: WecomInstanceStatus[];
+}
+
 interface PopoOpenClawConfig {
   enabled: boolean;
   connectionMode: 'websocket' | 'webhook';
@@ -856,7 +890,7 @@ interface IMGatewayStatus {
   discord: DiscordGatewayStatus;
   nim: NimGatewayStatus;
   'netease-bee': NeteaseBeeChanGatewayStatus;
-  wecom: WecomGatewayStatus;
+  wecom: WecomMultiInstanceStatus;
   popo: PopoGatewayStatus;
   weixin: WeixinGatewayStatus;
 }
