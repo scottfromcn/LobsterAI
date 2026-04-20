@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -44,21 +44,22 @@ LobsterAI is an Electron + React desktop application with two primary modes:
 
 Uses strict process isolation with IPC communication.
 
-### Authentication Flow
+#### Authentication Flow
 
-1. **登录：** 打开系统浏览器 → Portal 登录页 → URS 登录成功 → deep link `lobsterai://auth/callback?code=<authCode>`
-2. **换取令牌：** `POST /api/auth/exchange` 消费一次性 authCode → 返回 `accessToken`(2h) + `refreshToken`(30d)
-3. **持久化：** SQLite kv store `auth_tokens` 存储双 token，应用重启后自动恢复登录态
-4. **请求认证：** `fetchWithAuth()` 在每个 API 请求附加 `Authorization: Bearer <accessToken>`
-5. **被动刷新：** 收到 HTTP 401 → 使用 refreshToken 调用 `POST /api/auth/refresh` → 获取新 accessToken → 重试原请求
-6. **主动刷新：** 定期检查 accessToken 距 exp < 5 分钟 → 后台静默刷新，避免请求失败
-7. **滚动续期：** 每次 refresh 签发新 refreshToken（新 30 天有效期），连续使用不掉线
-8. **退出条件：** 连续 30 天不使用（refreshToken 过期）→ 清除本地 token → 用户需重新登录
+LobsterAI uses a dual-token authentication system with automatic refresh:
+1. **Login:** Opens system browser → Portal login page → URS login success → deep link `lobsterai://auth/callback?code=<authCode>`
+2. **Token exchange:** `POST /api/auth/exchange` consumes one-time authCode → returns `accessToken` (2h) + `refreshToken` (30d)
+3. **Persistence:** SQLite kv store `auth_tokens` stores both tokens; automatically restores login state on app restart
+4. **Request authentication:** `fetchWithAuth()` attaches `Authorization: Bearer <accessToken>` to each API request
+5. **Passive refresh:** On HTTP 401 → uses refreshToken to call `POST /api/auth/refresh` → gets new accessToken → retries original request
+6. **Proactive refresh:** Periodically checks if accessToken is within 5 minutes of expiry → silently refreshes in background to avoid request failures
+7. **Rolling renewal:** Each refresh issues a new refreshToken (new 30-day validity), continuous use keeps you logged in
+8. **Logout condition:** 30 days of inactivity (refreshToken expires) → clears local tokens → user must re-login
 
-**关键文件：**
-- Token 存储与请求：`src/renderer/services/api.ts`（`fetchWithAuth()`、token 管理）
-- 登录流程：`src/main/main.ts`（deep link 处理 `lobsterai://` 协议）
-- 持久化：`src/main/sqliteStore.ts`（kv 表存储 `auth_tokens`）
+**Key files:**
+- Token storage and requests: `src/renderer/services/api.ts` (`fetchWithAuth()`, token management)
+- Login flow: `src/main/main.ts` (deep link handler for `lobsterai://` protocol)
+- Persistence: `src/main/sqliteStore.ts` (kv table stores `auth_tokens`)
 
 ### Process Model
 
@@ -141,11 +142,36 @@ The Cowork feature provides AI-assisted coding sessions:
 The `CoworkEngineRouter` exposes stream events to the renderer, which is engine-agnostic. Engine-specific IPC: `openclaw:engine:*` channels manage runtime lifecycle separately from `cowork:*` session channels.
 
 **Memory System**: File-based persistent memory stored in the OpenClaw working directory:
-- `MEMORY.md` - Durable facts, preferences, and decisions; loaded automatically at every session start.
-- `memory/YYYY-MM-DD.md` - Daily notes for recent context.
-- `USER.md` / `SOUL.md` - User profile and agent personality files read at session startup.
-- Writes happen via the agent's `write` tool when the user issues an explicit "remember" instruction or the agent self-records important findings. No background extraction or confidence scoring.
-- GUI in Settings panel allows manual add/edit/delete of `MEMORY.md` entries.
+- `MEMORY.md` - Durable facts, preferences, and decisions; loaded automatically at every session start
+- `memory/YYYY-MM-DD.md` - Daily notes for recent context
+- `USER.md` / `SOUL.md` - User profile and agent personality files read at session startup
+- Writes happen via the agent's `write` tool when the user issues an explicit "remember" instruction or the agent self-records important findings. No background extraction or confidence scoring
+- GUI in Settings panel allows manual add/edit/delete of `MEMORY.md` entries
+
+### IM Gateways
+
+LobsterAI integrates with multiple IM platforms for remote Agent control from mobile devices:
+
+**Supported Platforms** (in `src/main/im/`):
+- **WeChat** - OpenClaw gateway integration, supports DMs and group chats
+- **WeCom** - OpenClaw gateway, WeCom app bot for DMs and groups
+- **DingTalk** - OpenClaw gateway, enterprise bot supports multiple instances
+- **Feishu/Lark** - OpenClaw gateway, app bot with multiple instance support
+- **QQ** - OpenClaw gateway, official Bot API, multiple instances
+- **Telegram** - OpenClaw gateway, Bot API with webhook and polling modes
+- **Discord** - OpenClaw gateway, supports servers and DMs
+- **NetEase IM** - Direct integration via `nim-web-sdk-ng` V2 SDK for P2P messaging
+- **NetEase Bee** - Direct integration via `nim-web-sdk-ng` for personal digital assistant
+- **NetEase POPO** - OpenClaw gateway, enterprise IM with WebSocket and Webhook
+
+**IM-Cowork Bridge** (`src/main/im/`):
+- IM messages trigger Cowork sessions on the desktop
+- Results are delivered back to the IM conversation
+- Session mappings stored in `im_session_mappings` table
+- Delivery modes: `direct` (send to IM), `silent` (desktop only), `digest` (summarized)
+- Reply guard prevents runaway loops when Agent messages trigger IM webhooks
+
+Configure tokens/secrets per platform in Settings → IM Integration panel.
 
 **Stream Events** (IPC from main to renderer):
 - `message` - New message added to session
@@ -159,15 +185,49 @@ The `CoworkEngineRouter` exposes stream events to the renderer, which is engine-
 - `cowork:getSession`, `cowork:listSessions`, `cowork:deleteSession`
 - `cowork:respondToPermission`, `cowork:getConfig`, `cowork:setConfig`
 
+### Scheduled Tasks System
+
+LobsterAI supports cron-based scheduled tasks that automatically trigger recurring work. Task metadata stored in SQLite `scheduled_task_meta` table; actual task definitions managed by OpenClaw.
+
+**Task Origins** (`src/scheduledTask/constants.ts` → `OriginKind`):
+- `manual` - Created via GUI in Scheduled Tasks panel
+- `cowork` - Created via Agent conversation
+- `migration` - Migrated from legacy system
+
+**Session Targets** (`SessionTarget`):
+- `main` - Runs in main session (shared context)
+- `isolated` - Runs in isolated session (fresh context each time)
+
+**Wake Modes** (`WakeMode`):
+- `exact` - Exact cron schedule
+- `lazy` - Runs if missed (e.g., app was asleep)
+
+**Task Lifecycle**:
+1. Creation via conversation or GUI → stored in `scheduled_task_meta`
+2. CronJobService monitors schedules → triggers on time
+3. Policy dispatcher (`coworkPolicy`, `imPolicy`) routes to execution
+4. Results delivered to desktop or pushed via IM
+
+**Delivery Modes** (`DeliveryMode`):
+- `desktop` - Show notification on desktop
+- `im` - Push to configured IM channel
+
+**Key Files**:
+- `src/scheduledTask/cronJobService.ts` - Cron scheduling engine
+- `src/scheduledTask/policies/` - Execution routing policies
+- `src/scheduledTask/metaStore.ts` - Task metadata CRUD
+- `src/scheduledTask/constants.ts` - All string constants for this module
+
 ### Key Patterns
 
 - **Streaming responses**: `apiService.chat()` uses SSE with `onProgress` callback for real-time message updates
 - **Cowork streaming**: Uses IPC event listeners (`onStreamMessage`, `onStreamMessageUpdate`, etc.) for bidirectional communication
 - **Markdown rendering**: `react-markdown` with `remark-gfm`, `remark-math`, `rehype-katex` for GitHub markdown and LaTeX
 - **Theme system**: Class-based Tailwind dark mode, applies `dark` class to `<html>` element
-- **i18n**: Simple key-value translation in `services/i18n.ts`, supports Chinese (default) and English. Language auto-detected from system locale on first run.
-- **Path alias**: `@` maps to `src/renderer/` in Vite config for imports.
+- **i18n**: Simple key-value translation in `services/i18n.ts`, supports Chinese (default) and English. Language auto-detected from system locale on first run
+- **Path alias**: `@` maps to `src/renderer/` in Vite config for imports
 - **Skills**: Custom skill definitions in `SKILLs/` directory, configured via `skills.config.json`
+- **Error classification**: `src/common/coworkErrorClassify.ts` categorizes errors for user-friendly messages and retry logic
 
 ### Artifacts System
 
@@ -201,8 +261,11 @@ The Artifacts feature provides rich preview of code outputs similar to Claude's 
 - Cowork config stored in `cowork_config` table (workingDirectory, systemPrompt, executionMode, **agentEngine**)
 - Cowork sessions and messages stored in `cowork_sessions` and `cowork_messages` tables
 - Scheduled task metadata stored in `scheduled_task_meta` table (origin and binding info); task definitions are managed by OpenClaw
+- IM gateway config stored in `im_config` table (tokens, secrets, webhook URLs per platform)
 - Database file: `lobsterai.sqlite` in user data directory
 - OpenClaw pinned version declared in `package.json` under `"openclaw": { "version": "...", "repo": "..." }`; update the version field and re-run to upgrade
+- Custom Agents configuration stored in `agents` table (name, description, systemPrompt, executionMode, agentEngine)
+- MCP server configurations stored in `mcp_servers` table (name, command, args, env)
 
 ### TypeScript Configuration
 
@@ -308,25 +371,56 @@ When adding or modifying log statements, verify:
 
 ## Testing Guidelines
 
-- Unit tests use [Vitest](https://vitest.dev/) and are **co-located** with the source files they cover.
-- Test files must use the `.test.ts` extension and be placed next to the source file (e.g. `src/main/foo.ts` → `src/main/foo.test.ts`).
+- Unit tests use [Vitest](https://vitest.dev/) and are **co-located** with the source files they cover
+- Test files must use the `.test.ts` extension and be placed next to the source file (e.g. `src/main/foo.ts` → `src/main/foo.test.ts`)
 - Import test utilities from `vitest`: `import { test, expect } from 'vitest';`
-- **Never** use `.test.mjs` or any other extension — `.test.ts` is the only accepted format.
-- Run all tests: `npm test`. Filter by module: `npm test -- <name>` (e.g. `npm test -- logger`).
-- Avoid importing Electron-only APIs (e.g. `electron-log`) in tests — inline any logic that depends on them.
+- **Never** use `.test.mjs` or any other extension — `.test.ts` is the only accepted format
+- Run all tests: `npm test`. Filter by module: `npm test -- <name>` (e.g. `npm test -- logger`)
+- Avoid importing Electron-only APIs (e.g. `electron-log`) in tests — inline any logic that depends on them
 - Validate UI changes manually by running `npm run electron:dev` and exercising key flows:
   - Cowork: start session, send prompts, approve/deny tool permissions, stop session
   - Artifacts: preview HTML, SVG, Mermaid diagrams, React components
   - Settings: theme switching, language switching
-- Keep console warnings/errors clean; lint via `npm run lint` before submitting.
+  - IM: send test message via configured IM platform
+  - Scheduled tasks: create task, verify it fires at scheduled time
+- Keep console warnings/errors clean; lint via `npm run lint` before submitting
+
+**Test Coverage** (40+ test files):
+- Main process: `coworkStore`, `skillManager`, IM gateways, OpenClaw adapters, scheduled tasks
+- Renderer: `coworkSlice`, `artifactSlice`, config management
+- Shared: error classification, constants, providers
 
 ## Internationalization (i18n)
 
-- **Never hardcode user-visible strings.** All UI text, labels, messages, and titles must go through the i18n system.
-- **Renderer process**: use `t('key')` from `src/renderer/services/i18n.ts`. Add new keys to both the `zh` and `en` sections in that file.
-- **Main process** (tray menu, session titles, notifications, etc.): use `t('key')` from `src/main/i18n.ts`. Add new keys to both the `zh` and `en` sections in that file.
-- When adding a new key, always provide translations for **both** languages. If unsure of a translation, leave a comment like `// TODO: translate` rather than omitting the key.
-- Error messages shown only in DevTools/logs (not visible to users) are exempt.
+- **Never hardcode user-visible strings.** All UI text, labels, messages, and titles must go through the i18n system
+- **Renderer process**: use `t('key')` from `src/renderer/services/i18n.ts`. Add new keys to both the `zh` and `en` sections in that file
+- **Main process** (tray menu, session titles, notifications, etc.): use `t('key')` from `src/main/i18n.ts`. Add new keys to both the `zh` and `en` sections in that file
+- When adding a new key, always provide translations for **both** languages. If unsure of a translation, leave a comment like `// TODO: translate` rather than omitting the key
+- Error messages shown only in DevTools/logs (not visible to users) are exempt
+- Language defaults to Chinese on first run, auto-detected from system locale
+
+## MCP (Model Context Protocol) Integration
+
+LobsterAI supports MCP servers for extending Agent capabilities with external tools and data sources.
+
+**Configuration**:
+- MCP server definitions stored in `mcp_servers` table
+- Each server has: name, command, args, env variables
+- Configured via Settings → MCP Servers panel or programmatically via IPC
+
+**Key IPC Channels**:
+- `mcp:listServers`, `mcp:addServer`, `mcp:updateServer`, `mcp:removeServer`
+- `mcp:testServer` - validates server configuration
+
+**Integration with OpenClaw**:
+- MCP servers are synced to OpenClaw config via `openclawConfigSync.ts`
+- Servers run as child processes, communicate via stdio
+- Agent can call MCP tools during Cowork sessions
+
+**Security**:
+- MCP servers run in isolated processes
+- Tool invocations still require user approval via permission modal
+- Server processes are terminated when app closes
 
 ## Commit & Pull Request Guidelines
 
