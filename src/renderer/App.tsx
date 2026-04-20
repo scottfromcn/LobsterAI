@@ -318,10 +318,6 @@ const App: React.FC = () => {
     }, 2200);
   }, []);
 
-  const handleShowLogin = useCallback(() => {
-    showToast(i18nService.t('featureInDevelopment'));
-  }, [showToast]);
-
   const runUpdateCheck = useCallback(async () => {
     try {
       const currentVersion = await window.electron.appInfo.getVersion();
@@ -344,14 +340,6 @@ const App: React.FC = () => {
     setDownloadProgress(null);
     setShowUpdateModal(true);
   }, [updateInfo]);
-
-  const handleUpdateFound = useCallback((info: AppUpdateInfo) => {
-    setUpdateInfo(info);
-    setUpdateModalState('info');
-    setUpdateError(null);
-    setDownloadProgress(null);
-    setShowUpdateModal(true);
-  }, []);
 
   const handleConfirmUpdate = useCallback(async () => {
     if (!updateInfo) return;
@@ -664,7 +652,6 @@ const App: React.FC = () => {
               onClose={handleCloseSettings}
               initialTab={settingsOptions.initialTab}
               notice={settingsOptions.notice}
-              onUpdateFound={handleUpdateFound}
               enterpriseConfig={enterpriseConfig}
             />
           )}
@@ -747,7 +734,6 @@ const App: React.FC = () => {
           onClose={handleCloseSettings}
           initialTab={settingsOptions.initialTab}
           notice={settingsOptions.notice}
-          onUpdateFound={handleUpdateFound}
           enterpriseConfig={enterpriseConfig}
         />
       )}
