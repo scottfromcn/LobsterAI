@@ -59,7 +59,7 @@ const CUSTOM_PROVIDER_KEYS = [
 ] as const;
 
 const providerKeys = [
-  ...Object.values(ProviderName).filter(id => id !== ProviderName.Custom && id !== ProviderName.LobsteraiServer),
+  ...Object.values(ProviderName).filter(id => id !== ProviderName.Custom),
   ...CUSTOM_PROVIDER_KEYS,
 ] as const;
 
@@ -178,7 +178,7 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   if (provider === 'openai' || provider === 'stepfun') {
     return 'openai';
   }
-  if (provider === 'youdaozhiyun' || provider === 'github-copilot' || provider === 'qianfan') {
+  if (provider === 'github-copilot' || provider === 'qianfan') {
     return 'openai';
   }
   // Moonshot /anthropic endpoint does not fully implement the Anthropic Messages
@@ -695,17 +695,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
             ...prev,
             minimax: {
               ...prev.minimax,
-              enabled: true,
-              apiKey: config.api.key,
-              baseUrl: config.api.baseUrl
-            }
-          }));
-        } else if (normalizedApiBaseUrl.includes('openapi.youdao.com')) {
-          setActiveProvider('youdaozhiyun');
-          setProviders(prev => ({
-            ...prev,
-            youdaozhiyun: {
-              ...prev.youdaozhiyun,
               enabled: true,
               apiKey: config.api.key,
               baseUrl: config.api.baseUrl

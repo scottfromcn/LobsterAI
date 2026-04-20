@@ -2548,18 +2548,6 @@ async function handleRequest(
   const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider);
   const openAIRequest = anthropicToOpenAI(parsedRequestBody);
 
-  // Inject session_id and user_message for lobsterai-server logging only.
-  // Strict providers (e.g. Gemini) reject unknown payload fields.
-  if (upstreamConfig.provider === 'lobsterai-server') {
-    if (currentCoworkSessionId) {
-      openAIRequest.session_id = currentCoworkSessionId;
-    }
-    const extractedUserMessage = extractLastUserMessageText(parsedRequestBody);
-    if (extractedUserMessage) {
-      openAIRequest.user_message = extractedUserMessage;
-    }
-  }
-
   if (!openAIRequest.model) {
     openAIRequest.model = upstreamConfig.model;
   }

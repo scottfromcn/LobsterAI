@@ -1,18 +1,14 @@
-import { OpenClawProviderId, ProviderRegistry } from '@shared/providers/constants';
+import { ProviderRegistry } from '@shared/providers/constants';
 
 import type { Model } from '../store/slices/modelSlice';
 
-export function toOpenClawModelRef(model: Pick<Model, 'id' | 'providerKey' | 'isServerModel'>): string {
-  if (model.isServerModel) {
-    return `${OpenClawProviderId.LobsteraiServer}/${model.id}`;
-  }
-
+export function toOpenClawModelRef(model: Pick<Model, 'id' | 'providerKey'>): string {
   return `${ProviderRegistry.getOpenClawProviderId(model.providerKey ?? '')}/${model.id}`;
 }
 
 export function matchesOpenClawModelRef(
   modelRef: string,
-  model: Pick<Model, 'id' | 'providerKey' | 'isServerModel'>,
+  model: Pick<Model, 'id' | 'providerKey'>,
 ): boolean {
   const normalizedRef = modelRef.trim();
   if (!normalizedRef) return false;
@@ -22,7 +18,7 @@ export function matchesOpenClawModelRef(
   return normalizedRef === model.id;
 }
 
-export function resolveOpenClawModelRef<T extends Pick<Model, 'id' | 'providerKey' | 'isServerModel'>>(
+export function resolveOpenClawModelRef<T extends Pick<Model, 'id' | 'providerKey'>>(
   modelRef: string,
   availableModels: T[],
 ): T | null {

@@ -319,8 +319,7 @@ const App: React.FC = () => {
 
   const runUpdateCheck = useCallback(async () => {
     try {
-      const currentVersion = await window.electron.appInfo.getVersion();
-      const nextUpdate = await checkForAppUpdate(currentVersion);
+      const nextUpdate = await checkForAppUpdate();
       setUpdateInfo(nextUpdate);
       if (!nextUpdate) {
         setShowUpdateModal(false);

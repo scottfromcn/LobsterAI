@@ -34,7 +34,7 @@ import {
   type PermissionResult,
 } from './libs/agentEngine';
 import { cancelActiveDownload, downloadUpdate, installUpdate } from './libs/appUpdateInstaller';
-import { clearServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setAuthTokensGetter, setServerBaseUrlGetter, setStoreGetter, updateServerModelMetadata } from './libs/claudeSettings';
+import { clearServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setStoreGetter } from './libs/claudeSettings';
 import {
   clearCopilotTokenState,
   initCopilotTokenManager,
@@ -72,7 +72,7 @@ import {
   updateMemoryEntry,
   writeBootstrapFile,
 } from './libs/openclawMemoryFile';
-import { startOpenClawTokenProxy, stopOpenClawTokenProxy } from './libs/openclawTokenProxy';
+import { stopOpenClawTokenProxy } from './libs/openclawTokenProxy';
 import { ensurePythonRuntimeReady } from './libs/pythonRuntime';
 import {
   applySystemProxyEnv,
@@ -1277,19 +1277,6 @@ const bindCoworkRuntimeForwarder = (): void => {
       if (win.isDestroyed()) return;
       win.webContents.send('cowork:stream:complete', { sessionId, claudeSessionId });
     });
-    // If session used a server model, notify renderer to refresh quota
-    try {
-      const apiConfig = resolveCurrentApiConfig();
-      if (apiConfig.providerMetadata?.providerName === 'lobsterai-server') {
-        const windows = BrowserWindow.getAllWindows();
-        windows.forEach((win) => {
-          if (win.isDestroyed()) return;
-          win.webContents.send('auth:quotaChanged');
-        });
-      }
-    } catch {
-      // ignore
-    }
   });
 
   runtime.on('error', (sessionId: string, error: string) => {
@@ -2187,8 +2174,8 @@ if (!gotTheLock) {
 
   ipcMain.handle('auth:login', async (_event, { loginUrl }: { loginUrl?: string } = {}) => {
     try {
-      const baseUrl = loginUrl || `${getServerApiBaseUrl()}/login`;
-      const finalUrl = `${baseUrl}?source=electron`;
+      if (!loginUrl) return { success: false, error: 'No login URL provided' };
+      const finalUrl = `${loginUrl}?source=electron`;
       await shell.openExternal(finalUrl);
       return { success: true };
     } catch (error) {
@@ -2197,164 +2184,38 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('auth:exchange', async (_event, { code }: { code: string }) => {
-    try {
-      const serverBaseUrl = getServerApiBaseUrl();
-      const resp = await net.fetch(`${serverBaseUrl}/api/auth/exchange`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ authCode: code }),
-      });
-      if (!resp.ok) {
-        return { success: false, error: `Exchange failed: ${resp.status}` };
-      }
-      const body = await resp.json() as {
-        code: number;
-        message?: string;
-        data: {
-          accessToken: string;
-          refreshToken: string;
-          user: Record<string, unknown>;
-          quota: Record<string, unknown>;
-        };
-      };
-      if (body.code !== 0 || !body.data) {
-        return { success: false, error: body.message || 'Exchange failed' };
-      }
-      saveAuthTokens(body.data.accessToken, body.data.refreshToken);
-      return { success: true, user: body.data.user, quota: normalizeQuota(body.data.quota) };
-    } catch (error) {
-      console.error('[Auth] exchange failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Exchange failed' };
-    }
+  ipcMain.handle('auth:exchange', async () => {
+    return { success: false, error: 'Server authentication is no longer supported.' };
   });
 
   ipcMain.handle('auth:getUser', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (!tokens) return { success: false };
-      const serverBaseUrl = getServerApiBaseUrl();
-      // Fetch user profile
-      const profileResp = await fetchWithAuth(`${serverBaseUrl}/api/user/profile`);
-      if (!profileResp.ok) return { success: false };
-      const profileBody = await profileResp.json() as { code: number; data: Record<string, unknown> };
-      if (profileBody.code !== 0 || !profileBody.data) return { success: false };
-      // Fetch quota separately
-      const quotaResp = await fetchWithAuth(`${serverBaseUrl}/api/user/quota`);
-      let quota = null;
-      if (quotaResp.ok) {
-        const quotaBody = await quotaResp.json() as { code: number; data: Record<string, unknown> };
-        if (quotaBody.code === 0 && quotaBody.data) {
-          quota = normalizeQuota(quotaBody.data);
-        }
-      }
-      return { success: true, user: profileBody.data, quota };
-    } catch {
-      return { success: false };
-    }
+    return { success: false };
   });
 
   ipcMain.handle('auth:getQuota', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (!tokens) return { success: false };
-      const serverBaseUrl = getServerApiBaseUrl();
-      const resp = await fetchWithAuth(`${serverBaseUrl}/api/user/quota`);
-      if (!resp.ok) return { success: false };
-      const body = await resp.json() as { code: number; data: Record<string, unknown> };
-      if (body.code !== 0 || !body.data) return { success: false };
-      return { success: true, quota: normalizeQuota(body.data) };
-    } catch {
-      return { success: false };
-    }
+    return { success: false };
   });
 
   ipcMain.handle('auth:getProfileSummary', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (!tokens) return { success: false };
-      const serverBaseUrl = getServerApiBaseUrl();
-      const resp = await fetchWithAuth(`${serverBaseUrl}/api/user/profile-summary`);
-      if (!resp.ok) return { success: false };
-      const body = await resp.json() as { code: number; data: Record<string, unknown> };
-      if (body.code !== 0 || !body.data) return { success: false };
-      return { success: true, data: body.data };
-    } catch {
-      return { success: false };
-    }
+    return { success: false };
   });
 
   ipcMain.handle('auth:logout', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (tokens) {
-        const serverBaseUrl = getServerApiBaseUrl();
-        await net.fetch(`${serverBaseUrl}/api/auth/logout`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${tokens.accessToken}` },
-        }).catch(() => { /* best-effort */ });
-      }
-      clearAuthTokens();
-      clearServerModelMetadata();
-      return { success: true };
-    } catch {
-      clearAuthTokens();
-      clearServerModelMetadata();
-      return { success: true };
-    }
+    clearAuthTokens();
+    clearServerModelMetadata();
+    return { success: true };
   });
 
   ipcMain.handle('auth:refreshToken', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (!tokens?.refreshToken) return { success: false };
-      const serverBaseUrl = getServerApiBaseUrl();
-      const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-      });
-      if (!resp.ok) return { success: false };
-      const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
-      if (body.code !== 0 || !body.data) return { success: false };
-      saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
-      return { success: true, accessToken: body.data.accessToken };
-    } catch {
-      return { success: false };
-    }
+    return { success: false };
   });
 
   ipcMain.handle('auth:getAccessToken', async () => {
-    const tokens = getAuthTokens();
-    return tokens?.accessToken || null;
+    return null;
   });
 
   ipcMain.handle('auth:getModels', async () => {
-    try {
-      const tokens = getAuthTokens();
-      if (!tokens) {
-        console.log('[Auth:getModels] No auth tokens available');
-        return { success: false };
-      }
-      const serverBaseUrl = getServerApiBaseUrl();
-      const url = `${serverBaseUrl}/api/models/available`;
-      console.log('[Auth:getModels] Fetching:', url);
-      const resp = await fetchWithAuth(url);
-      console.log('[Auth:getModels] Response status:', resp.status);
-      if (!resp.ok) {
-        console.log('[Auth:getModels] Response not ok:', resp.status, resp.statusText);
-        return { success: false };
-      }
-      const data = await resp.json() as { code: number; data: Array<{ modelId: string; modelName: string; provider: string; apiFormat: string; supportsImage?: boolean }> };
-      console.log('[Auth:getModels] Response data:', JSON.stringify(data).slice(0, 500));
-      if (data.code !== 0) return { success: false };
-      // Cache server model metadata for use in OpenClaw config sync (supportsImage, etc.)
-      updateServerModelMetadata(data.data);
-      return { success: true, models: data.data };
-    } catch (e) {
-      console.error('[Auth:getModels] Error:', e);
-      return { success: false };
-    }
+    return { success: false };
   });
 
   // Skills IPC handlers
@@ -5015,66 +4876,6 @@ if (!gotTheLock) {
     }
     // Inject store getter into claudeSettings
     setStoreGetter(() => store);
-    // Inject auth getters for lobsterai-server provider routing
-    // The getter proactively triggers a background token refresh when the
-    // accessToken is within 5 minutes of expiry, so that the SDK always
-    // gets a fresh token without blocking.
-    //
-    // refreshOnce() is the single entry-point for all token refresh paths
-    // (proactive, proxy 401/403 retry). It deduplicates concurrent calls via
-    // pendingTokenRefresh so that rolling refresh tokens are never consumed twice.
-    const refreshOnce = async (reason: string): Promise<string | null> => {
-      if (pendingTokenRefresh) {
-        return pendingTokenRefresh;
-      }
-      let resolvedToken: string | null = null;
-      pendingTokenRefresh = (async () => {
-        try {
-          const tokens = getAuthTokens();
-          if (!tokens?.refreshToken) return null;
-          const serverBaseUrl = getServerApiBaseUrl();
-          const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-          });
-          if (resp.ok) {
-            const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
-            if (body.code === 0 && body.data) {
-              saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
-              console.log(`[Auth] token refresh succeeded (reason: ${reason})`);
-              resolvedToken = body.data.accessToken;
-              // Token proxy handles fresh tokens dynamically — no need
-              // to restart the gateway on token refresh.
-              syncOpenClawConfig({ reason: `token-refresh:${reason}`, restartGatewayIfRunning: false }).catch((err) => {
-                console.warn('[Auth] post-refresh OpenClaw config sync failed:', err);
-              });
-            }
-          }
-        } catch (err) {
-          console.warn(`[Auth] token refresh failed (reason: ${reason}):`, err);
-        } finally {
-          pendingTokenRefresh = null;
-        }
-        return resolvedToken;
-      })();
-      return pendingTokenRefresh;
-    };
-
-    setAuthTokensGetter(() => {
-      const tokens = getAuthTokens();
-      if (!tokens) return null;
-      // Check if accessToken is close to expiry and trigger background refresh
-      try {
-        const payload = JSON.parse(Buffer.from(tokens.accessToken.split('.')[1], 'base64').toString());
-        const expiresAt = payload.exp * 1000;
-        if (expiresAt - Date.now() < 5 * 60 * 1000) {
-          void refreshOnce('proactive'); // fire-and-forget
-        }
-      } catch { /* unable to parse JWT, return token as-is */ }
-      return tokens;
-    });
-    setServerBaseUrlGetter(() => getServerApiBaseUrl());
 
     // Initialize Copilot token manager and restore token state if available
     initCopilotTokenManager(getStore);
@@ -5090,30 +4891,6 @@ if (!gotTheLock) {
       });
     }
 
-    registerProxyTokenRefresher('lobsterai-server', async () => {
-      const tokens = getAuthTokens();
-      if (!tokens?.refreshToken) return null;
-      const serverBaseUrl = getServerApiBaseUrl();
-      try {
-        const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-        });
-        if (resp.ok) {
-          const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
-          if (body.code === 0 && body.data) {
-            saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
-            console.log('[Auth] proxy token refresh succeeded');
-            return body.data.accessToken;
-          }
-        }
-      } catch (err) {
-        console.warn('[Auth] proxy token refresh failed:', err);
-      }
-      return null;
-    });
-
     registerProxyTokenRefresher('github-copilot', async () => {
       try {
         const { refreshCopilotTokenNow } = await import('./libs/copilotTokenManager');
@@ -5124,19 +4901,6 @@ if (!gotTheLock) {
         return null;
       }
     });
-
-    // Start the lightweight token proxy before OpenClaw config sync so that
-    // lobsterai-server provider can use the proxy URL in its config.
-    try {
-      await startOpenClawTokenProxy({
-        getAuthTokens,
-        refreshToken: refreshOnce,
-        getServerBaseUrl: getServerApiBaseUrl,
-      });
-      console.log('[Main] OpenClaw token proxy started');
-    } catch (err) {
-      console.warn('[Main] OpenClaw token proxy failed to start (non-fatal):', err);
-    }
 
     // Enterprise config sync — must run before openclawConfigSync
     // so enterprise data is in SQLite when the config is generated.

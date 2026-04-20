@@ -9,7 +9,7 @@ import type { DiscordOpenClawConfig, IMSettings, TelegramOpenClawConfig } from '
 import type { DingTalkInstanceConfig, FeishuInstanceConfig, NeteaseBeeChanConfig, NimConfig, PopoOpenClawConfig, QQInstanceConfig, WecomInstanceConfig, WeixinOpenClawConfig } from '../im/types';
 import { OpenClawSessionKeepAlive } from '../openclawSessionPolicy/constants';
 import { buildOpenClawSessionConfig } from '../openclawSessionPolicy/store';
-import { getAllServerModelMetadata, resolveAllEnabledProviderConfigs, resolveAllProviderApiKeys, resolveRawApiConfig } from './claudeSettings';
+import { resolveAllEnabledProviderConfigs, resolveAllProviderApiKeys, resolveRawApiConfig } from './claudeSettings';
 import { getCoworkOpenAICompatProxyBaseURL, getCoworkOpenAICompatProxyToken } from './coworkOpenAICompatProxy';
 import type { McpToolManifestEntry } from './mcpServerManager';
 import {
@@ -22,7 +22,6 @@ import {
 import { parseChannelSessionKey } from './openclawChannelSessionSync';
 import type { OpenClawEngineManager } from './openclawEngineManager';
 import { findThirdPartyExtensionsDir, hasBundledOpenClawExtension } from './openclawLocalExtensions';
-import { getOpenClawTokenProxyPort } from './openclawTokenProxy';
 
 export type McpBridgeConfig = {
   callbackUrl: string;
@@ -459,21 +458,6 @@ type ProviderDescriptor = {
 };
 
 const PROVIDER_REGISTRY: Record<string, ProviderDescriptor> = {
-  [ProviderName.LobsteraiServer]: {
-    providerId: OpenClawProviderId.LobsteraiServer,
-    resolveApi: () => OpenClawApiConst.OpenAICompletions as OpenClawProviderApi,
-    normalizeBaseUrl: (url) => {
-      const proxyPort = getOpenClawTokenProxyPort();
-      return proxyPort
-        ? `http://127.0.0.1:${proxyPort}/v1`
-        : stripChatCompletionsSuffix(url);
-    },
-    resolveApiKey: () => {
-      const proxyPort = getOpenClawTokenProxyPort();
-      return proxyPort ? '${LOBSTER_PROXY_TOKEN}' : `\${${providerApiKeyEnvVar('server')}}`;
-    },
-  },
-
   [ProviderName.Moonshot]: {
     providerId: OpenClawProviderId.Moonshot,
     resolveApi: ({ apiType, baseURL }) => mapApiTypeToOpenClawApi(apiType, undefined, baseURL),
@@ -536,12 +520,6 @@ const PROVIDER_REGISTRY: Record<string, ProviderDescriptor> = {
   [ProviderName.Minimax]: {
     providerId: OpenClawProviderId.Minimax,
     resolveApi: ({ apiType, baseURL }) => mapApiTypeToOpenClawApi(apiType, undefined, baseURL),
-    normalizeBaseUrl: stripChatCompletionsSuffix,
-  },
-
-  [ProviderName.Youdaozhiyun]: {
-    providerId: OpenClawProviderId.Youdaozhiyun,
-    resolveApi: () => OpenClawApiConst.OpenAICompletions as OpenClawProviderApi,
     normalizeBaseUrl: stripChatCompletionsSuffix,
   },
 
@@ -882,32 +860,6 @@ export class OpenClawConfigSync {
         }
       }
 
-      const proxyPort = getOpenClawTokenProxyPort();
-      if (proxyPort && !allProvidersMap[ProviderName.LobsteraiServer]) {
-        const serverModels = getAllServerModelMetadata();
-        const firstServerModelId = serverModels[0]?.modelId || modelId;
-        const firstServerSel = buildProviderSelection({
-          apiKey: 'proxy-managed',
-          baseURL: `http://127.0.0.1:${proxyPort}/v1`,
-          modelId: firstServerModelId,
-          apiType: 'openai',
-          providerName: ProviderName.LobsteraiServer,
-          supportsImage: serverModels[0]?.supportsImage,
-        });
-        const lobsteraiProviderConfig = { ...firstServerSel.providerConfig, models: [] as typeof firstServerSel.providerConfig.models };
-        for (const sm of serverModels) {
-          lobsteraiProviderConfig.models.push({
-            id: sm.modelId,
-            name: sm.modelId,
-            api: OpenClawApiConst.OpenAICompletions as OpenClawProviderApi,
-            input: sm.supportsImage ? ['text', 'image'] : ['text'],
-          });
-        }
-        if (lobsteraiProviderConfig.models.length === 0) {
-          lobsteraiProviderConfig.models.push(firstServerSel.providerConfig.models[0]);
-        }
-        allProvidersMap[OpenClawProviderId.LobsteraiServer] = lobsteraiProviderConfig;
-      }
     }
 
     const sandboxMode = mapExecutionModeToSandboxMode(coworkConfig.executionMode || 'local', this.isEnterprise());
