@@ -30,16 +30,6 @@
         "id": "openclaw-weixin",
         "npm": "@tencent-weixin/openclaw-weixin",
         "version": "2.1.7"
-      },
-      {
-        "id": "openclaw-nim-channel",
-        "npm": "@nimsuite/openclaw-nim-channel",
-        "version": "1.0.3"
-      },
-      {
-        "id": "openclaw-netease-bee",
-        "npm": "openclaw-netease-bee",
-        "version": "0.1.3"
       }
     ]
   },
