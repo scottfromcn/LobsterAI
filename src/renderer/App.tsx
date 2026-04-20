@@ -56,6 +56,7 @@ const App: React.FC = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateRuntimeState>({
     status: AppUpdateStatus.Idle,
+    source: null,
     info: null,
     progress: null,
     readyFilePath: null,
@@ -72,6 +73,7 @@ const App: React.FC = () => {
   const toastTimerRef = useRef<number | null>(null);
   const hasInitialized = useRef(false);
   const previousUpdateStatusRef = useRef<AppUpdateRuntimeState['status']>(AppUpdateStatus.Idle);
+  const shouldInstallReadyUpdateRef = useRef(false);
   const dispatch = useDispatch();
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
   const currentSessionId = useSelector(selectCurrentSessionId);
@@ -356,6 +358,14 @@ const App: React.FC = () => {
 
       if (state.status === AppUpdateStatus.Ready && previousStatus !== AppUpdateStatus.Ready) {
         setShowUpdateModal(true);
+        if (shouldInstallReadyUpdateRef.current && state.readyFilePath) {
+          shouldInstallReadyUpdateRef.current = false;
+          void window.electron.appUpdate.installReady().then((installResult) => {
+            if (!installResult.success) {
+              showToast(installResult.error || i18nService.t('updateInstallFailed'));
+            }
+          });
+        }
       }
     });
 
@@ -396,6 +406,7 @@ const App: React.FC = () => {
     if (!updateInfo) return;
 
     if (appUpdateState.readyFilePath) {
+      shouldInstallReadyUpdateRef.current = false;
       const installResult = await window.electron.appUpdate.installReady();
       if (!installResult.success) {
         showToast(installResult.error || i18nService.t('updateInstallFailed'));
@@ -406,8 +417,10 @@ const App: React.FC = () => {
     if (appUpdateState.status === AppUpdateStatus.Error || appUpdateState.status === AppUpdateStatus.Available) {
       const isManualUrl = updateInfo.url.includes('#') || updateInfo.url.endsWith('/download-list');
       if (!isManualUrl) {
+        shouldInstallReadyUpdateRef.current = appUpdateState.status === AppUpdateStatus.Available;
         const retryResult = await window.electron.appUpdate.retryDownload();
         if (!retryResult.success) {
+          shouldInstallReadyUpdateRef.current = false;
           showToast(i18nService.t('updateDownloadFailed'));
         }
         return;
@@ -415,6 +428,7 @@ const App: React.FC = () => {
     }
 
     if (updateInfo.url.includes('#') || updateInfo.url.endsWith('/download-list')) {
+      shouldInstallReadyUpdateRef.current = false;
       setShowUpdateModal(false);
       try {
         const result = await window.electron.shell.openExternal(updateInfo.url);
@@ -430,16 +444,19 @@ const App: React.FC = () => {
   }, [appUpdateState.readyFilePath, appUpdateState.status, showToast, updateInfo]);
 
   const handleCancelDownload = useCallback(async () => {
+    shouldInstallReadyUpdateRef.current = false;
     await window.electron.appUpdate.cancelDownload();
   }, []);
 
   const handleRetryUpdate = useCallback(async () => {
     if (!updateInfo) return;
     if (updateInfo.url.includes('#') || updateInfo.url.endsWith('/download-list')) {
+      shouldInstallReadyUpdateRef.current = false;
       setShowUpdateModal(false);
       await window.electron.shell.openExternal(updateInfo.url);
       return;
     }
+    shouldInstallReadyUpdateRef.current = false;
     await window.electron.appUpdate.retryDownload();
   }, [updateInfo]);
 
@@ -579,26 +596,27 @@ const App: React.FC = () => {
     let cancelled = false;
     let lastCheckTime = 0;
 
-    const maybeCheck = async () => {
+    const maybeCheck = async (reason: 'startup' | 'heartbeat' | 'visibility') => {
       if (cancelled) return;
       const now = Date.now();
       if (lastCheckTime > 0 && now - lastCheckTime < APP_UPDATE_POLL_INTERVAL_MS) return;
       lastCheckTime = now;
+      console.log(`[App] auto update check triggered, reason=${reason}, at=${new Date(now).toISOString()}`);
       await runUpdateCheck();
     };
 
     // 启动时立即检查
-    void maybeCheck();
+    void maybeCheck('startup');
 
     // 心跳：每 30 分钟检测是否距上次检查已超过 12 小时
     const timer = window.setInterval(() => {
-      void maybeCheck();
+      void maybeCheck('heartbeat');
     }, APP_UPDATE_HEARTBEAT_INTERVAL_MS);
 
     // 窗口恢复可见时检测（覆盖休眠唤醒场景）
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        void maybeCheck();
+        void maybeCheck('visibility');
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);

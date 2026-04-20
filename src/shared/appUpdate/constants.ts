@@ -10,6 +10,13 @@ export const AppUpdateStatus = {
 
 export type AppUpdateStatus = typeof AppUpdateStatus[keyof typeof AppUpdateStatus];
 
+export const AppUpdateSource = {
+  Auto: 'auto',
+  Manual: 'manual',
+} as const;
+
+export type AppUpdateSource = typeof AppUpdateSource[keyof typeof AppUpdateSource];
+
 export const AppUpdateIpc = {
   GetState: 'appUpdate:getState',
   CheckNow: 'appUpdate:checkNow',
@@ -40,6 +47,7 @@ export interface AppUpdateInfo {
 
 export interface AppUpdateRuntimeState {
   status: AppUpdateStatus;
+  source: AppUpdateSource | null;
   info: AppUpdateInfo | null;
   progress: AppUpdateDownloadProgress | null;
   readyFilePath: string | null;
