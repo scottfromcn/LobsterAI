@@ -17,8 +17,13 @@ npm run build
 # Lint with ESLint
 npm run lint
 
-# Run memory extractor tests (Node.js built-in test runner)
-npm run test:memory
+# Format with Prettier
+npm run format
+npm run format:check    # check without writing
+
+# Run all tests (Vitest)
+npm test
+npm test -- logger      # filter by filename pattern
 
 # Compile Electron main process only
 npm run compile:electron
@@ -44,7 +49,7 @@ LobsterAI is an Electron + React desktop application with two primary modes:
 
 Uses strict process isolation with IPC communication.
 
-#### Authentication Flow
+### Authentication Flow
 
 LobsterAI uses a dual-token authentication system with automatic refresh:
 1. **Login:** Opens system browser → Portal login page → URS login success → deep link `lobsterai://auth/callback?code=<authCode>`
@@ -95,6 +100,14 @@ src/main/
     │   └── openclawRuntimeAdapter.ts # OpenClaw gateway adapter
     ├── openclawEngineManager.ts # OpenClaw runtime lifecycle (install/start/status)
     ├── openclawConfigSync.ts    # Syncs cowork config → OpenClaw config files
+
+src/common/              # Shared between main and renderer (no Electron/React deps)
+├── coworkErrorClassify.ts      # Error categorization for user messages and retry
+└── openclawSession.ts          # OpenClaw session types
+
+src/shared/              # Cross-process constants and provider config (imported via @shared)
+├── platform/            # Platform detection constants
+└── providers/           # LLM provider definitions, model constants, coding plan types
 
 src/renderer/
 ├── types/cowork.ts      # Cowork type definitions
@@ -226,6 +239,7 @@ LobsterAI supports cron-based scheduled tasks that automatically trigger recurri
 - **Theme system**: Class-based Tailwind dark mode, applies `dark` class to `<html>` element
 - **i18n**: Simple key-value translation in `services/i18n.ts`, supports Chinese (default) and English. Language auto-detected from system locale on first run
 - **Path alias**: `@` maps to `src/renderer/` in Vite config for imports
+- **Path alias**: `@shared` maps to `src/shared/` (cross-process constants, provider config)
 - **Skills**: Custom skill definitions in `SKILLs/` directory, configured via `skills.config.json`
 - **Error classification**: `src/common/coworkErrorClassify.ts` categorizes errors for user-friendly messages and retry logic
 
@@ -376,6 +390,7 @@ When adding or modifying log statements, verify:
 - Import test utilities from `vitest`: `import { test, expect } from 'vitest';`
 - **Never** use `.test.mjs` or any other extension — `.test.ts` is the only accepted format
 - Run all tests: `npm test`. Filter by module: `npm test -- <name>` (e.g. `npm test -- logger`)
+- Path aliases `@` and `@shared` are configured in `vitest.config.ts` for tests
 - Avoid importing Electron-only APIs (e.g. `electron-log`) in tests — inline any logic that depends on them
 - Validate UI changes manually by running `npm run electron:dev` and exercising key flows:
   - Cowork: start session, send prompts, approve/deny tool permissions, stop session
@@ -453,3 +468,4 @@ chore: bump version to 2026.3.18
 
 - PRs should include a concise description, linked issue if applicable, and screenshots for UI changes.
 - Call out any Electron-specific behavior changes (IPC, storage, windowing) in the PR description.
+- Husky enforces commitlint on `commit-msg`; the `pre-commit` hook is intentionally empty.

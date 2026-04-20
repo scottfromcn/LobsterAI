@@ -131,8 +131,12 @@ LobsterAI is an all-in-one personal assistant Agent built by NetEase Youdao, pow
 ### Documentation
 - [x] **README** - Comprehensive project overview with architecture diagrams
 - [x] **AGENTS.md** - Developer guidance for Claude Code with architecture, patterns, and guidelines
+- [x] **CLAUDE.md** - Updated with test commands, path aliases, shared directories, husky config
 - [x] **Logging Guidelines** - electron-log integration with level-based message format
 - [x] **String Constants Pattern** - Centralized constants with `as const` pattern
+
+### Branding
+- [x] **Logo** - App logo, build icons (macOS .icns, Windows .ico), tray icons generated from source
 
 ---
 
