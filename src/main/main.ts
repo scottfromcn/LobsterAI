@@ -307,7 +307,7 @@ const resolveInlineAttachmentDir = (cwd?: string): string => {
       return path.join(resolved, '.cowork-temp', 'attachments', 'manual');
     }
   }
-  return path.join(app.getPath('temp'), 'lobsterai', 'attachments');
+  return path.join(app.getPath('temp'), 'metroai', 'attachments');
 };
 
 const ensurePngFileName = (value: string): string => {
@@ -324,7 +324,7 @@ const buildLogExportFileName = (): string => {
   const now = new Date();
   const datePart = `${now.getFullYear()}${padTwoDigits(now.getMonth() + 1)}${padTwoDigits(now.getDate())}`;
   const timePart = `${padTwoDigits(now.getHours())}${padTwoDigits(now.getMinutes())}${padTwoDigits(now.getSeconds())}`;
-  return `lobsterai-logs-${datePart}-${timePart}.zip`;
+  return `metroai-logs-${datePart}-${timePart}.zip`;
 };
 
 const truncateIpcString = (value: string, maxChars: number): string => {
@@ -505,8 +505,8 @@ const enableVerboseLogging =
   process.env.ELECTRON_ENABLE_LOGGING === '1' ||
   process.env.ELECTRON_ENABLE_LOGGING === 'true';
 const disableGpu =
-  process.env.LOBSTERAI_DISABLE_GPU === '1' ||
-  process.env.LOBSTERAI_DISABLE_GPU === 'true' ||
+  process.env.METROAI_DISABLE_GPU === '1' ||
+  process.env.METROAI_DISABLE_GPU === 'true' ||
   process.env.ELECTRON_DISABLE_GPU === '1' ||
   process.env.ELECTRON_DISABLE_GPU === 'true';
 const reloadOnChildProcessGone =
@@ -1863,13 +1863,13 @@ if (!gotTheLock) {
   app.quit();
 } else {
   // Register custom protocol for OAuth callback
-  app.setAsDefaultProtocolClient('lobsterai');
+  app.setAsDefaultProtocolClient('metroai');
 
   // Buffer for deep link auth code received before renderer is ready
   let pendingAuthCode: string | null = null;
 
   /**
-   * Parse a lobsterai:// deep link and send (or buffer) the auth code.
+   * Parse a metroai:// deep link and send (or buffer) the auth code.
    */
   const handleDeepLink = (url: string) => {
     try {
@@ -1906,7 +1906,7 @@ if (!gotTheLock) {
     console.debug('[Main] second-instance event', { commandLine, workingDirectory });
 
     // Check for deep link in command line args (Windows/Linux)
-    const deepLink = commandLine.find(arg => arg.startsWith('lobsterai://'));
+    const deepLink = commandLine.find(arg => arg.startsWith('metroai://'));
     if (deepLink) {
       handleDeepLink(deepLink);
     }
@@ -5318,7 +5318,7 @@ if (!gotTheLock) {
 
     // Windows/Linux cold start: parse deep link from process.argv
     // Always buffer since renderer is not ready yet after createWindow()
-    const coldStartDeepLink = process.argv.find(arg => arg.startsWith('lobsterai://'));
+    const coldStartDeepLink = process.argv.find(arg => arg.startsWith('metroai://'));
     if (coldStartDeepLink) {
       try {
         const parsed = new URL(coldStartDeepLink);

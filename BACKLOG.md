@@ -1,6 +1,6 @@
-# LobsterAI Project Backlog
+# MetroAI Project Backlog
 
-This file tracks the development progress, pending tasks, and completed features of the LobsterAI project.
+This file tracks the development progress, pending tasks, and completed features of the MetroAI project.
 
 **Last Updated:** 2026-04-20
 
@@ -8,7 +8,7 @@ This file tracks the development progress, pending tasks, and completed features
 
 ## Project Overview
 
-LobsterAI is an all-in-one personal assistant Agent built by NetEase Youdao, powered by Electron + React + OpenClaw. It provides AI-assisted coding sessions, scheduled tasks, IM integration, and rich artifact previews.
+MetroAI is an all-in-one personal assistant Agent powered by Electron + React + OpenClaw. It provides AI-assisted coding sessions, scheduled tasks, IM integration, and rich artifact previews.
 
 ---
 
@@ -98,8 +98,8 @@ LobsterAI is an all-in-one personal assistant Agent built by NetEase Youdao, pow
 - [x] **QQ** - Official Bot API integration
 - [x] **Telegram** - Bot API with webhook and polling
 - [x] **Discord** - Bot integration
-- [x] **NetEase IM** - Direct SDK integration (P2P messaging)
-- [x] **NetEase Bee** - Direct SDK integration
+- [x] **NetEase IM** - SDK integration (P2P messaging)
+- [x] **NetEase Bee** - SDK integration
 - [x] **NetEase POPO** - OpenClaw gateway integration
 
 ### Scheduled Tasks
@@ -137,6 +137,8 @@ LobsterAI is an all-in-one personal assistant Agent built by NetEase Youdao, pow
 
 ### Branding
 - [x] **Logo** - App logo, build icons (macOS .icns, Windows .ico), tray icons generated from source
+- [x] **Rebrand LobsterAI → MetroAI** - Complete rebrand across all source, config, docs, scripts, and templates
+- [x] **Remove NetEase/Youdao branding** - Removed all 网易有道/NetEase Youdao references, URLs, privacy dialog
 
 ---
 

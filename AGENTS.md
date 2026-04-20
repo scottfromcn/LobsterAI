@@ -43,7 +43,7 @@ npm run openclaw:runtime:host   # current platform
 
 ## Architecture Overview
 
-LobsterAI is an Electron + React desktop application with two primary modes:
+MetroAI is an Electron + React desktop application with two primary modes:
 1. **Cowork Mode** - AI-assisted coding sessions powered by OpenClaw as the primary agent engine
 2. **Artifacts System** - Rich preview of code outputs (HTML, SVG, React, Mermaid)
 
@@ -51,7 +51,7 @@ Uses strict process isolation with IPC communication.
 
 ### Authentication Flow
 
-LobsterAI uses a dual-token authentication system with automatic refresh:
+MetroAI uses a dual-token authentication system with automatic refresh:
 1. **Login:** Opens system browser → Portal login page → URS login success → deep link `lobsterai://auth/callback?code=<authCode>`
 2. **Token exchange:** `POST /api/auth/exchange` consumes one-time authCode → returns `accessToken` (2h) + `refreshToken` (30d)
 3. **Persistence:** SQLite kv store `auth_tokens` stores both tokens; automatically restores login state on app restart
@@ -163,7 +163,7 @@ The `CoworkEngineRouter` exposes stream events to the renderer, which is engine-
 
 ### IM Gateways
 
-LobsterAI integrates with multiple IM platforms for remote Agent control from mobile devices:
+MetroAI integrates with multiple IM platforms for remote Agent control from mobile devices:
 
 **Supported Platforms** (in `src/main/im/`):
 - **WeChat** - OpenClaw gateway integration, supports DMs and group chats
@@ -200,7 +200,7 @@ Configure tokens/secrets per platform in Settings → IM Integration panel.
 
 ### Scheduled Tasks System
 
-LobsterAI supports cron-based scheduled tasks that automatically trigger recurring work. Task metadata stored in SQLite `scheduled_task_meta` table; actual task definitions managed by OpenClaw.
+MetroAI supports cron-based scheduled tasks that automatically trigger recurring work. Task metadata stored in SQLite `scheduled_task_meta` table; actual task definitions managed by OpenClaw.
 
 **Task Origins** (`src/scheduledTask/constants.ts` → `OriginKind`):
 - `manual` - Created via GUI in Scheduled Tasks panel
@@ -416,7 +416,7 @@ When adding or modifying log statements, verify:
 
 ## MCP (Model Context Protocol) Integration
 
-LobsterAI supports MCP servers for extending Agent capabilities with external tools and data sources.
+MetroAI supports MCP servers for extending Agent capabilities with external tools and data sources.
 
 **Configuration**:
 - MCP server definitions stored in `mcp_servers` table

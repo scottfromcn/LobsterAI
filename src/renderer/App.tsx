@@ -163,9 +163,8 @@ const App: React.FC = () => {
           dispatch(setSelectedModel(preferredModel));
         }
 
-        // 检查隐私协议是否已同意（必须在 setIsInitialized 之前）
-        const agreed = await window.electron.store.get('privacy_agreed');
-        setPrivacyAgreed(agreed === true);
+        // 跳过隐私协议，直接标记已同意
+        setPrivacyAgreed(true);
 
         setIsInitialized(true);
         console.info('[App] initializeApp: shell ready');

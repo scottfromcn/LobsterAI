@@ -1,9 +1,9 @@
 {
-  "name": "lobsterai",
+  "name": "metroai",
   "private": true,
   "author": {
-    "name": "LobsterAI",
-    "email": "lobsterai.project@rd.netease.com"
+    "name": "MetroAI",
+    "email": "metroai@metroclaw.com"
   },
   "license": "MIT",
   "version": "2026.4.17",

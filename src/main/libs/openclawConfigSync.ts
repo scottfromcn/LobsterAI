@@ -170,10 +170,10 @@ const MANAGED_WEB_SEARCH_POLICY_PROMPT = [
   'When you need live web information:',
   '- If you already have a specific URL, use `web_fetch`.',
   '- If you need search discovery, dynamic pages, or interactive browsing, use the built-in `browser` tool.',
-  '- Only use the LobsterAI `web-search` skill when local command execution is available. Native channel sessions may deny `exec`, so prefer `browser` or `web_fetch` there.',
+  '- Only use the MetroAI `web-search` skill when local command execution is available. Native channel sessions may deny `exec`, so prefer `browser` or `web_fetch` there.',
   '- Exception: the `imap-smtp-email` skill must always use `exec` to run its scripts, even in native channel sessions. Do not skip it because of exec restrictions.',
   '',
-  'Do not claim you searched the web unless you actually used `browser`, `web_fetch`, or the LobsterAI `web-search` skill.',
+  'Do not claim you searched the web unless you actually used `browser`, `web_fetch`, or the MetroAI `web-search` skill.',
 ].join('\n');
 
 const MANAGED_EXEC_SAFETY_PROMPT = [
@@ -203,9 +203,9 @@ const MANAGED_EXEC_SAFETY_PROMPT = [
  * embedding in AGENTS.md so the model knows where to create new skills.
  *
  * Example outputs:
- *   macOS:   ~/Library/Application Support/LobsterAI/SKILLs
- *   Windows: ~/AppData/Roaming/LobsterAI/SKILLs
- *   Linux:   ~/.config/LobsterAI/SKILLs
+ *   macOS:   ~/Library/Application Support/MetroAI/SKILLs
+ *   Windows: ~/AppData/Roaming/MetroAI/SKILLs
+ *   Linux:   ~/.config/MetroAI/SKILLs
  */
 const resolveSkillCreationPath = (): string => {
   const skillsDir = path.join(app.getPath('userData'), 'SKILLs');
@@ -220,7 +220,7 @@ const resolveSkillCreationPath = (): string => {
 const buildManagedSkillCreationPrompt = (skillsDirPath: string): string => [
   '## Skill Creation',
   '',
-  'When the user asks you to create a new skill, you MUST place it under the LobsterAI skills directory:',
+  'When the user asks you to create a new skill, you MUST place it under the MetroAI skills directory:',
   '',
   `  ${skillsDirPath}/<skill-name>/SKILL.md`,
   '',
@@ -1085,7 +1085,7 @@ export class OpenClawConfigSync {
           ...(hasAskUserPlugin
             ? { 'ask-user-question': { enabled: true } }
             : {}),
-          // Disable acpx (ACP agent runtime) — LobsterAI does not use ACP and
+          // Disable acpx (ACP agent runtime) — MetroAI does not use ACP and
           // the embedded probe adds ~11s to gateway startup while it waits for
           // a process that always fails.  See openclaw/openclaw#62588.
           'acpx': { enabled: false },
@@ -1289,7 +1289,7 @@ export class OpenClawConfigSync {
         clientSecret: `\${${secretEnvVar}}`,
         // v3.5.x schema: dmPolicy/groupPolicy/allowFrom are valid; sessionTimeout/
         // separateSessionByConversation/groupSessionScope/sharedMemoryAcrossConversations/
-        // gatewayBaseUrl were LobsterAI-specific and are not in the plugin schema.
+        // gatewayBaseUrl were MetroAI-specific and are not in the plugin schema.
         dmPolicy: inst.dmPolicy || 'open',
         allowFrom: (() => {
           const ids = inst.allowFrom?.length ? [...inst.allowFrom] : [];
@@ -1889,13 +1889,13 @@ export class OpenClawConfigSync {
   }
 
   /**
-   * Resolve the LobsterAI SKILLs installation directory for OpenClaw's
+   * Resolve the MetroAI SKILLs installation directory for OpenClaw's
    * `skills.load.extraDirs` configuration.
    *
    * Cross-platform paths (via Electron app.getPath('userData')):
-   *   macOS:   ~/Library/Application Support/LobsterAI/SKILLs
-   *   Windows: %APPDATA%/LobsterAI/SKILLs
-   *   Linux:   ~/.config/LobsterAI/SKILLs
+   *   macOS:   ~/Library/Application Support/MetroAI/SKILLs
+   *   Windows: %APPDATA%/MetroAI/SKILLs
+   *   Linux:   ~/.config/MetroAI/SKILLs
    */
   private resolveSkillsExtraDirs(): string[] {
     const userDataSkillsDir = path.join(app.getPath('userData'), 'SKILLs');
@@ -1913,8 +1913,8 @@ export class OpenClawConfigSync {
   }
 
   /**
-   * Build per-skill `enabled` overrides from the LobsterAI SkillManager state,
-   * so that skills disabled in the LobsterAI UI are also hidden from OpenClaw.
+   * Build per-skill `enabled` overrides from the MetroAI SkillManager state,
+   * so that skills disabled in the MetroAI UI are also hidden from OpenClaw.
    */
   private buildSkillEntries(): Record<string, { enabled: boolean }> {
     const skills = this.getSkillsList?.() ?? [];
@@ -1929,10 +1929,10 @@ export class OpenClawConfigSync {
    * Sync AGENTS.md to the OpenClaw workspace directory.
    * Embeds the skills routing prompt and system prompt so that OpenClaw's
    * native channel connectors (DingTalk, Feishu, etc.) can discover and
-   * invoke LobsterAI skills.
+   * invoke MetroAI skills.
    */
   private syncAgentsMd(workspaceDir: string, coworkConfig: CoworkConfig): string | undefined {
-    const MARKER = '<!-- LobsterAI managed: do not edit below this line -->';
+    const MARKER = '<!-- MetroAI managed: do not edit below this line -->';
 
     try {
       ensureDir(workspaceDir);
