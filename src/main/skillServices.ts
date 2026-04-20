@@ -429,7 +429,7 @@ export class SkillServiceManager {
         try {
           const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim());
           this.webSearchPid = pid;
-        } catch (error) {
+        } catch {
           return false;
         }
       } else {
@@ -441,7 +441,7 @@ export class SkillServiceManager {
     try {
       process.kill(this.webSearchPid, 0); // Signal 0 checks if process exists
       return true;
-    } catch (error) {
+    } catch {
       this.webSearchPid = null;
       return false;
     }
@@ -487,7 +487,7 @@ export class SkillServiceManager {
         signal: AbortSignal.timeout(3000)
       });
       return response.ok;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
