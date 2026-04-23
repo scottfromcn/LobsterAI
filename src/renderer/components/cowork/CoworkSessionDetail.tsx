@@ -923,7 +923,7 @@ const ToolCallGroup: React.FC<{
               {toolName}
             </span>
             {toolInputSummary && (
-              <code className="text-xs text-muted font-mono truncate max-w-[400px]">
+              <code className="text-xs text-muted font-mono truncate max-w-full">
                 {toolInputSummary}
               </code>
             )}
