@@ -236,6 +236,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       if (shouldClear) {
         setValue('');
         dispatch(clearDraftAttachments(draftKey));
+        setImageVisionHint(false);
       }
       requestAnimationFrame(() => {
         textareaRef.current?.focus();
@@ -257,8 +258,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   // Sync value from draft when sessionId changes
   useEffect(() => {
     setValue(draftPrompt);
+    // Re-derive imageVisionHint from the new session's draft attachments
+    const hasImageWithoutVision = !modelSupportsImage && attachments.some(a => a.isImage || isImagePath(a.path));
+    setImageVisionHint(hasImageWithoutVision);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftKey]); // intentionally omit draftPrompt to only trigger on session switch
+  }, [draftKey]); // intentionally omit other deps to only trigger on session switch
 
   useEffect(() => {
     if (value !== draftPrompt) {

@@ -306,7 +306,8 @@ const App: React.FC = () => {
   }, []);
 
   const handleNewChat = useCallback(() => {
-    const shouldClearInput = mainView === 'cowork' || !!currentSessionId;
+    // Only clear when already on home (no session) — preserve __home__ draft when returning from a session
+    const shouldClearInput = mainView === 'cowork' && !currentSessionId;
     coworkService.clearSession();
     dispatch(clearSelection());
     setMainView('cowork');

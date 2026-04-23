@@ -439,17 +439,19 @@ const CoworkView: React.FC<CoworkViewProps> = ({ onRequestAppSettings, onShowSki
 
   useEffect(() => {
     const handleNewSession = () => {
+      // Only clear when already on home (no session) — preserve __home__ draft when returning from a session
+      const shouldClear = !currentSession;
       dispatch(clearCurrentSession());
       dispatch(clearSelection());
       window.dispatchEvent(new CustomEvent('cowork:focus-input', {
-        detail: { clear: true },
+        detail: { clear: shouldClear },
       }));
     };
     window.addEventListener('cowork:shortcut:new-session', handleNewSession);
     return () => {
       window.removeEventListener('cowork:shortcut:new-session', handleNewSession);
     };
-  }, [dispatch]);
+  }, [dispatch, currentSession]);
 
   useEffect(() => {
     if (!isOpenClawEngine) return;
