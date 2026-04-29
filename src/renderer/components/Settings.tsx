@@ -4421,8 +4421,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
         ];
         const activeItem = bootstrapTabs.find((t) => t.key === bootstrapTab) ?? bootstrapTabs[0];
         return (
-          <div className="space-y-4">
-            <div className="flex gap-1 border-b border-border">
+          <div className="flex flex-col h-full space-y-4">
+            <div className="flex gap-1 border-b border-border shrink-0">
               {bootstrapTabs.map((tab) => (
                 <button
                   type="button"
@@ -4438,17 +4438,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                 </button>
               ))}
             </div>
-            <div className="space-y-2">
-              <p className="text-xs text-secondary">{i18nService.t(activeItem.hintKey)}</p>
-              <div className="text-xs text-secondary opacity-60">
+            <div className="flex flex-col flex-1 min-h-0 space-y-2">
+              <p className="text-xs text-secondary shrink-0">{i18nService.t(activeItem.hintKey)}</p>
+              <div className="text-xs text-secondary opacity-60 shrink-0">
                 {i18nService.t('coworkBootstrapStoragePath')}：<span className="font-mono">{joinWorkspacePath(coworkConfig.workingDirectory, activeItem.key)}</span>
               </div>
               <textarea
                 key={activeItem.key}
                 value={activeItem.value}
                 onChange={(e) => activeItem.setter(e.target.value)}
-                rows={8}
-                className="w-full rounded-lg border px-3 py-2 text-sm border-border bg-surface text-foreground resize-y"
+                className="w-full flex-1 min-h-[280px] rounded-lg border px-3 py-2 text-sm leading-relaxed border-border bg-surface text-foreground resize-none"
                 placeholder={i18nService.t('coworkBootstrapPlaceholder')}
               />
             </div>
