@@ -131,12 +131,17 @@ function buildSkillEnv(): Record<string, string | undefined> {
   // Normalize PATH key casing on Windows to avoid duplicate PATH/Path issues
   normalizePathKey(env);
 
-  if (app.isPackaged) {
-    // Ensure HOME is set (crucial for npm to find its config)
-    if (!env.HOME) {
-      env.HOME = app.getPath('home');
-    }
+  // Ensure HOME is available for tools (e.g. clawhub CLI) that persist state
+  // under the user's home directory. Without this, some runtimes may resolve
+  // to root ("/.clawhub") in packaged apps.
+  if (!env.HOME) {
+    env.HOME = app.getPath('home');
+  }
+  if (process.platform === 'win32' && !env.USERPROFILE) {
+    env.USERPROFILE = env.HOME;
+  }
 
+  if (app.isPackaged) {
     if (process.platform === 'win32') {
       // On Windows, merge the latest PATH from the registry to pick up
       // tools installed after the Electron app (or Explorer) was started.
@@ -917,6 +922,7 @@ const downloadClawhubSkill = async (
   targetDir: string,
   env: NodeJS.ProcessEnv
 ): Promise<void> => {
+  fs.mkdirSync(targetDir, { recursive: true });
   const npxCliJs = resolveNpxCliJs();
   const electronPath = getElectronNodeRuntimePath();
 
@@ -943,6 +949,7 @@ const downloadClawhubSkill = async (
 
   try {
     await runCommand(command, args, {
+      cwd: targetDir,
       env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
     });
   } catch (error) {
