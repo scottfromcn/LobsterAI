@@ -136,9 +136,11 @@ function buildSkillEnv(): Record<string, string | undefined> {
   // to root ("/.clawhub") in packaged apps.
   if (!env.HOME) {
     env.HOME = app.getPath('home');
+    console.debug('[skills] HOME was unset; using Electron user home directory');
   }
   if (process.platform === 'win32' && !env.USERPROFILE) {
     env.USERPROFILE = env.HOME;
+    console.debug('[skills] USERPROFILE was unset; aligned with HOME for skill subprocesses');
   }
 
   if (app.isPackaged) {
@@ -929,7 +931,10 @@ const downloadClawhubSkill = async (
   let command: string;
   let args: string[];
   if (npxCliJs) {
-    console.log(`[downloadClawhubSkill] using bundled npx: electron="${electronPath}", npxCliJs="${npxCliJs}"`);
+    console.log(
+      `[downloadClawhubSkill] cwd="${targetDir}" skill="${skillName}" `
+      + `electron="${electronPath}" npxCliJs="${npxCliJs}"`,
+    );
     command = electronPath;
     args = [npxCliJs, 'clawhub@latest', 'install', skillName, '--dir', targetDir, '--no-input', '--force'];
     // Inject --require script to hide CMD windows from all descendant processes
@@ -939,7 +944,10 @@ const downloadClawhubSkill = async (
     }
   } else {
     const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    console.log(`[downloadClawhubSkill] bundled npx not found, falling back to system "${npxCommand}"`);
+    console.log(
+      `[downloadClawhubSkill] cwd="${targetDir}" skill="${skillName}" `
+      + `bundled npx not found, falling back to system "${npxCommand}"`,
+    );
     if (!hasCommand(npxCommand, env)) {
       throw new Error('npx is not available. Please install Node.js from https://nodejs.org/');
     }
