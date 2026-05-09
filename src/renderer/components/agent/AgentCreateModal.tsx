@@ -9,7 +9,7 @@ import { i18nService } from '../../services/i18n';
 import { imService } from '../../services/im';
 import type { RootState } from '../../store';
 import type { Model } from '../../store/slices/modelSlice';
-import type { DingTalkInstanceConfig, FeishuInstanceConfig, IMGatewayConfig, QQInstanceConfig, WecomInstanceConfig } from '../../types/im';
+import type { DingTalkInstanceConfig, DiscordInstanceConfig, FeishuInstanceConfig, IMGatewayConfig, PopoInstanceConfig, QQInstanceConfig, WecomInstanceConfig } from '../../types/im';
 import { toOpenClawModelRef } from '../../utils/openclawModelRef';
 import { getVisibleIMPlatforms } from '../../utils/regionFilter';
 import Modal from '../common/Modal';
@@ -18,10 +18,10 @@ import AgentSkillSelector from './AgentSkillSelector';
 import EmojiPicker from './EmojiPicker';
 
 type CreateTab = 'basic' | 'skills' | 'im';
-type MultiInstancePlatform = 'dingtalk' | 'feishu' | 'qq' | 'wecom';
-type MultiInstanceConfig = DingTalkInstanceConfig | FeishuInstanceConfig | QQInstanceConfig | WecomInstanceConfig;
+type MultiInstancePlatform = 'dingtalk' | 'feishu' | 'qq' | 'wecom' | 'discord' | 'popo';
+type MultiInstanceConfig = DingTalkInstanceConfig | FeishuInstanceConfig | QQInstanceConfig | WecomInstanceConfig | DiscordInstanceConfig | PopoInstanceConfig;
 
-const MULTI_INSTANCE_PLATFORMS: MultiInstancePlatform[] = ['dingtalk', 'feishu', 'qq', 'wecom'];
+const MULTI_INSTANCE_PLATFORMS: MultiInstancePlatform[] = ['dingtalk', 'feishu', 'qq', 'wecom', 'discord', 'popo'];
 
 const isMultiInstancePlatform = (platform: Platform): platform is MultiInstancePlatform =>
   MULTI_INSTANCE_PLATFORMS.includes(platform as MultiInstancePlatform);
@@ -41,8 +41,7 @@ const AgentCreateModal: React.FC<AgentCreateModalProps> = ({ isOpen, onClose }) 
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
   const [activeTab, setActiveTab] = useState<CreateTab>('basic');
-  const availableModels = useSelector((state: RootState) => state.model.availableModels);
-  const globalSelectedModel = useSelector((state: RootState) => state.model.selectedModel);
+  const globalSelectedModel = useSelector((state: RootState) => state.model.defaultSelectedModel);
   const agents = useSelector((state: RootState) => state.agent.agents);
   const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
 
@@ -281,11 +280,6 @@ const AgentCreateModal: React.FC<AgentCreateModalProps> = ({ isOpen, onClose }) 
                   value={model}
                   onChange={setModel}
                 />
-                {availableModels.length > 0 && (
-                  <p className="mt-1 text-xs text-secondary/70">
-                    {i18nService.t('agentModelOpenClawOnly') || 'This setting only applies to the OpenClaw engine'}
-                  </p>
-                )}
               </div>
             </div>
           )}

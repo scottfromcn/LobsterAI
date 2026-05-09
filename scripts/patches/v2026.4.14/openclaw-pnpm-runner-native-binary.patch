@@ -1,0 +1,28 @@
+diff --git a/scripts/pnpm-runner.mjs b/scripts/pnpm-runner.mjs
+index 0d713e99..1efddf21 100644
+--- a/scripts/pnpm-runner.mjs
++++ b/scripts/pnpm-runner.mjs
+@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
+ import path from "node:path";
+ import { buildCmdExeCommandLine } from "./windows-cmd-helpers.mjs";
+ 
+-function isPnpmExecPath(value) {
+-  return /^pnpm(?:-cli)?(?:\.(?:c?js|cmd|exe))?$/.test(path.basename(value).toLowerCase());
++function isNodeRunnablePnpmExecPath(value) {
++  return /^pnpm(?:-cli)?\.(?:c?js)$/.test(path.basename(value).toLowerCase());
+ }
+ 
+ export function resolvePnpmRunner(params = {}) {
+@@ -14,7 +14,11 @@ export function resolvePnpmRunner(params = {}) {
+   const platform = params.platform ?? process.platform;
+   const comSpec = params.comSpec ?? process.env.ComSpec ?? "cmd.exe";
+ 
+-  if (typeof npmExecPath === "string" && npmExecPath.length > 0 && isPnpmExecPath(npmExecPath)) {
++  if (
++    typeof npmExecPath === "string" &&
++    npmExecPath.length > 0 &&
++    isNodeRunnablePnpmExecPath(npmExecPath)
++  ) {
+     return {
+       command: nodeExecPath,
+       args: [...nodeArgs, npmExecPath, ...pnpmArgs],

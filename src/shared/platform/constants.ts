@@ -122,16 +122,25 @@ const DEFINITIONS = [
     logo: 'discord.svg',
     guideUrl: '',
   },
+  {
+    id: 'email',
+    label: 'Email',
+    region: 'china',
+    channel: 'email',
+    channelAliases: ['clawemail', 'clawemail-email'],
+    logo: 'email.svg',
+    guideUrl: '',
+  },
 ] as const satisfies readonly PlatformDefInput[];
 
 // ═══════════════════════════════════════════════════════
 // 3. Derived Types
 // ═══════════════════════════════════════════════════════
 
-export type Platform = typeof DEFINITIONS[number]['id'];
+export type Platform = (typeof DEFINITIONS)[number]['id'];
 export type ChannelName =
-  | typeof DEFINITIONS[number]['channel']
-  | typeof DEFINITIONS[number]['channelAliases'][number];
+  | (typeof DEFINITIONS)[number]['channel']
+  | (typeof DEFINITIONS)[number]['channelAliases'][number];
 
 // ═══════════════════════════════════════════════════════
 // 4. Platform Definition Interface (public)

@@ -1,4 +1,4 @@
-import { ArrowPathIcon } from '@heroicons/react/20/solid';
+import { ArrowPathIcon, XCircleIcon as XCircleIconSolid } from '@heroicons/react/20/solid';
 import {
   ArrowDownTrayIcon,
   CheckCircleIcon,
@@ -29,6 +29,7 @@ import SkillSecurityReport from './SkillSecurityReport';
 
 type SkillTab = 'installed' | 'marketplace';
 type ImportSourceType = 'github' | 'clawhub';
+type DirectImportSource = 'zip' | 'folder' | 'remote';
 
 const importSourceTypes: ImportSourceType[] = ['github', 'clawhub'];
 
@@ -83,6 +84,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
   const [isDeletingSkill, setIsDeletingSkill] = useState(false);
   const [securityReport, setSecurityReport] = useState<SkillSecurityReportData | null>(null);
   const [pendingInstallId, setPendingInstallId] = useState<string | null>(null);
+  const [pendingImportSource, setPendingImportSource] = useState<DirectImportSource | null>(null);
   const [isConfirmingInstall, setIsConfirmingInstall] = useState(false);
   const [upgradeState, setUpgradeState] = useState<{
     isActive: boolean;
@@ -96,6 +98,10 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
   const addSkillMenuRef = useRef<HTMLDivElement>(null);
   const addSkillButtonRef = useRef<HTMLButtonElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+
+  const showToast = (message: string) => {
+    window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
+  };
 
   useEffect(() => {
     let isActive = true;
@@ -190,7 +196,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
   }, [selectedSkill, selectedMarketplaceSkill]);
 
   const filteredSkills = useMemo(() => {
-    const query = skillSearchQuery.toLowerCase();
+    const query = skillSearchQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     return skills.filter(skill => {
       const matchesSearch = skill.name.toLowerCase().includes(query)
         || skillService.getLocalizedSkillDescription(skill.id, skill.name, skill.description).toLowerCase().includes(query);
@@ -199,7 +205,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
   }, [skills, skillSearchQuery]);
 
   const filteredMarketplaceSkills = useMemo(() => {
-    const query = skillSearchQuery.toLowerCase();
+    const query = skillSearchQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     let results = marketplaceSkills;
     if (query) {
       results = results.filter(skill => {
@@ -262,7 +268,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
     setSkillPendingDelete(null);
   };
 
-  const handleAddSkillFromSource = async (source: string) => {
+  const handleAddSkillFromSource = async (source: string, sourceType: DirectImportSource) => {
     const trimmedSource = source.trim();
     if (!trimmedSource) return;
     setIsDownloadingSkill(true);
@@ -286,11 +292,13 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
       setIsRemoteImportOpen(false);
       setSecurityReport(result.auditReport);
       setPendingInstallId(result.pendingInstallId);
+      setPendingImportSource(sourceType);
       return;
     }
     if (result.skills) {
       dispatch(setSkills(result.skills));
     }
+    showToast(i18nService.t('skillImportSuccess'));
     setSkillDownloadSource('');
     setIsAddSkillMenuOpen(false);
     setIsRemoteImportOpen(false);
@@ -303,7 +311,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
       filters: [{ name: 'Zip', extensions: ['zip'] }],
     });
     if (result.success && result.path) {
-      await handleAddSkillFromSource(result.path);
+      await handleAddSkillFromSource(result.path, 'zip');
     }
   };
 
@@ -311,7 +319,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
     if (isDownloadingSkill) return;
     const result = await window.electron.dialog.selectDirectory();
     if (result.success && result.path) {
-      await handleAddSkillFromSource(result.path);
+      await handleAddSkillFromSource(result.path, 'folder');
     }
   };
 
@@ -370,7 +378,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
       }
     }
 
-    await handleAddSkillFromSource(trimmed);
+    await handleAddSkillFromSource(trimmed, 'remote');
   };
 
   const getSkillInstallStatus = (marketplaceSkill: MarketplaceSkill): 'not_installed' | 'installed' | 'update_available' => {
@@ -416,6 +424,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
         setUpgradeState(null);
         setSecurityReport(result.auditReport);
         setPendingInstallId(result.pendingInstallId);
+        setPendingImportSource(null);
         return;
       }
       if (result.skills) {
@@ -490,6 +499,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
       if (result.auditReport && result.pendingInstallId) {
         setSecurityReport(result.auditReport);
         setPendingInstallId(result.pendingInstallId);
+        setPendingImportSource(null);
         return;
       }
       if (result.skills) {
@@ -509,6 +519,9 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
       const result = await skillService.confirmInstall(pendingInstallId, action);
       if (result.success && result.skills) {
         dispatch(setSkills(result.skills));
+        if (action !== 'cancel' && pendingImportSource) {
+          showToast(i18nService.t('skillImportSuccess'));
+        }
       }
       if (!result.success && result.error) {
         setSkillActionError(result.error);
@@ -518,6 +531,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
     } finally {
       setSecurityReport(null);
       setPendingInstallId(null);
+      setPendingImportSource(null);
       setIsConfirmingInstall(false);
       setInstallingSkillId(null);
       setSkillDownloadSource('');
@@ -552,8 +566,17 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
             placeholder={i18nService.t('searchSkills')}
             value={skillSearchQuery}
             onChange={(e) => setSkillSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 text-sm rounded-xl bg-surface text-foreground placeholder-secondary border border-border focus:outline-none focus:ring-2 focus:ring-primary"
+            className="w-full pl-9 pr-8 py-2 text-sm rounded-xl bg-surface text-foreground placeholder-secondary border border-border focus:outline-none focus:ring-2 focus:ring-primary"
           />
+          {skillSearchQuery && (
+            <button
+              type="button"
+              onClick={() => setSkillSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-secondary hover:text-primary transition-colors"
+            >
+              <XCircleIconSolid className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <div className="relative">
           <button

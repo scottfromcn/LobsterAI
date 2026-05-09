@@ -11,13 +11,16 @@ describe('ProviderName constants', () => {
     expect(ProviderName.OpenAI).toBe('openai');
     expect(ProviderName.DeepSeek).toBe('deepseek');
     expect(ProviderName.Custom).toBe('custom');
+    expect(ProviderName.LobsteraiServer).toBe('lobsterai-server');
   });
 });
 
 describe('ProviderRegistry', () => {
   test('providerIds returns 16 providers (no custom)', () => {
     const ids = ProviderRegistry.providerIds;
+    expect(ids.length).toBe(16);
     expect(ids).not.toContain(ProviderName.Custom);
+    expect(ids).not.toContain(ProviderName.LobsteraiServer);
   });
 
   test('get returns definition for known provider', () => {
@@ -33,11 +36,24 @@ describe('ProviderRegistry', () => {
     expect(ProviderRegistry.get(ProviderName.Custom)).toBeUndefined();
   });
 
-  test('supportsCodingPlan is true for moonshot, qwen, zhipu, volcengine', () => {
+  test('resolveModelSupportsImage repairs known provider model metadata', () => {
+    expect(ProviderRegistry.resolveModelSupportsImage(ProviderName.Qwen, 'qwen3.6-plus', false)).toBe(true);
+    expect(ProviderRegistry.resolveModelSupportsImage(ProviderName.Qwen, 'qwen3-coder-plus', true)).toBe(false);
+  });
+
+  test('resolveModelSupportsImage upgrades custom providers for globally known vision models', () => {
+    expect(ProviderRegistry.resolveModelSupportsImage('custom_0', 'qwen3.6-plus', false)).toBe(true);
+    expect(ProviderRegistry.resolveModelSupportsImage('custom_0', 'unknown-model', false)).toBe(false);
+    expect(ProviderRegistry.resolveModelSupportsImage('custom_0', 'unknown-model', true)).toBe(true);
+  });
+
+  test('supportsCodingPlan is true for moonshot, qwen, zhipu, volcengine, qianfan, xiaomi', () => {
     expect(ProviderRegistry.supportsCodingPlan(ProviderName.Moonshot)).toBe(true);
     expect(ProviderRegistry.supportsCodingPlan(ProviderName.Qwen)).toBe(true);
     expect(ProviderRegistry.supportsCodingPlan(ProviderName.Zhipu)).toBe(true);
     expect(ProviderRegistry.supportsCodingPlan(ProviderName.Volcengine)).toBe(true);
+    expect(ProviderRegistry.supportsCodingPlan(ProviderName.Qianfan)).toBe(true);
+    expect(ProviderRegistry.supportsCodingPlan(ProviderName.Xiaomi)).toBe(true);
   });
 
   test('supportsCodingPlan is false for others', () => {
@@ -72,9 +88,9 @@ describe('ProviderRegistry', () => {
     expect(en[2]).toBe(ProviderName.Gemini);
   });
 
-  test('idsForEnLocale puts ollama at end', () => {
+  test('idsForEnLocale puts lm-studio at end', () => {
     const en = ProviderRegistry.idsForEnLocale();
-    expect(en[en.length - 1]).toBe(ProviderName.Ollama);
+    expect(en[en.length - 1]).toBe(ProviderName.LmStudio);
     expect(en).not.toContain(ProviderName.Custom);
   });
 
@@ -104,6 +120,7 @@ describe('ProviderRegistry', () => {
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Qwen, 'anthropic')).toBe('https://coding.dashscope.aliyuncs.com/apps/anthropic');
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Zhipu, 'anthropic')).toBe('https://open.bigmodel.cn/api/anthropic');
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Volcengine, 'anthropic')).toBe('https://ark.cn-beijing.volces.com/api/coding');
+      expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Xiaomi, 'anthropic')).toBe('https://token-plan-cn.xiaomimimo.com/anthropic');
     });
 
     test('returns openai endpoint for coding-plan-supported providers', () => {
@@ -111,6 +128,8 @@ describe('ProviderRegistry', () => {
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Qwen, 'openai')).toBe('https://coding.dashscope.aliyuncs.com/v1');
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Zhipu, 'openai')).toBe('https://open.bigmodel.cn/api/coding/paas/v4');
       expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Volcengine, 'openai')).toBe('https://ark.cn-beijing.volces.com/api/coding/v3');
+      expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Qianfan, 'openai')).toBe('https://qianfan.baidubce.com/v2/coding/chat/completions');
+      expect(ProviderRegistry.getCodingPlanUrl(ProviderName.Xiaomi, 'openai')).toBe('https://token-plan-cn.xiaomimimo.com/v1');
     });
 
     test('returns undefined for providers that do not support codingPlan', () => {

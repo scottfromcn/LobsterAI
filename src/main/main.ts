@@ -5,9 +5,12 @@ import os from 'os';
 import path from 'path';
 
 import type { OpenClawSessionPatch } from '../common/openclawSession';
+import { buildSessionTitleFromInput } from '../common/sessionTitle';
 import { buildScheduledTaskEnginePrompt } from '../scheduledTask/enginePrompt';
 import { migrateScheduledTaskRunsToOpenclaw, migrateScheduledTasksToOpenclaw } from '../scheduledTask/migrate';
+import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { PlatformRegistry } from '../shared/platform';
+import { ProviderName } from '../shared/providers';
 import { AgentManager } from './agentManager';
 import { APP_NAME } from './appConstants';
 import { getAutoLaunchEnabled, isAutoLaunched, setAutoLaunchEnabled } from './autoLaunchManager';
@@ -20,7 +23,9 @@ import {
   readAllowFromStore,
   rejectPairingRequest,
 } from './im/imPairingStore';
-import type { DingTalkInstanceConfig, FeishuInstanceConfig, Platform, QQInstanceConfig, WecomInstanceConfig } from './im/types';
+import { pollNimQrLogin, startNimQrLogin } from './im/nimQrLoginService';
+import type { DingTalkInstanceConfig, DiscordInstanceConfig, EmailMultiInstanceConfig, FeishuInstanceConfig, NimInstanceConfig, Platform, QQInstanceConfig, TelegramInstanceConfig, WecomInstanceConfig } from './im/types';
+import { registerNimQrLoginHandlers } from './ipcHandlers/nimQrLogin';
 import {
   getCronJobService,
   initCronJobServiceManager,
@@ -33,8 +38,8 @@ import {
   OpenClawRuntimeAdapter,
   type PermissionResult,
 } from './libs/agentEngine';
-import { cancelActiveDownload, downloadUpdate, installUpdate } from './libs/appUpdateInstaller';
-import { clearServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setStoreGetter } from './libs/claudeSettings';
+import { AppUpdateCoordinator } from './libs/appUpdateCoordinator';
+import { clearServerModelMetadata, getAllServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setAuthTokensGetter, setServerBaseUrlGetter, setStoreGetter, updateServerModelMetadata } from './libs/claudeSettings';
 import {
   clearCopilotTokenState,
   initCopilotTokenManager,
@@ -45,12 +50,12 @@ import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { getCoworkLogPath } from './libs/coworkLogger';
 import { registerProxyTokenRefresher, startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy } from './libs/coworkOpenAICompatProxy';
 import { generateSessionTitle, probeCoworkModelReadiness } from './libs/coworkUtil';
-import { getServerApiBaseUrl } from './libs/endpoints';
+import { getServerApiBaseUrl, getSkillStoreUrl, refreshEndpointsTestMode } from './libs/endpoints';
 import { mergeEnterpriseOpenclawConfig, resolveEnterpriseConfigPath, syncEnterpriseConfig } from './libs/enterpriseConfigSync';
 import { exportLogsZip } from './libs/logExport';
 import { McpBridgeServer } from './libs/mcpBridgeServer';
 import { McpServerManager } from './libs/mcpServerManager';
-import { resolveQualifiedAgentModelRef } from './libs/openclawAgentModels';
+import { parsePrimaryModelRef, resolveQualifiedAgentModelRef } from './libs/openclawAgentModels';
 import {
   buildManagedSessionKey,
   DEFAULT_MANAGED_AGENT_ID,
@@ -63,20 +68,23 @@ import {
   addMemoryEntry,
   deleteMemoryEntry,
   ensureDefaultIdentity,
+  getMainAgentWorkspacePath,
   migrateSqliteToMemoryMd,
   readBootstrapFile,
   readMemoryEntries,
   resolveMemoryFilePath,
   searchMemoryEntries,
-  syncMemoryFileOnWorkspaceChange,
   updateMemoryEntry,
   writeBootstrapFile,
 } from './libs/openclawMemoryFile';
-import { stopOpenClawTokenProxy } from './libs/openclawTokenProxy';
+import { startOpenClawTokenProxy, stopOpenClawTokenProxy } from './libs/openclawTokenProxy';
+import { migrateMainAgentWorkspace } from './libs/openclawWorkspaceMigration';
 import { ensurePythonRuntimeReady } from './libs/pythonRuntime';
+import { serializeForLog } from './libs/sanitizeForLog';
+import { SqliteBackupManager } from './libs/sqliteBackup/sqliteBackupManager';
 import {
   applySystemProxyEnv,
-  resolveSystemProxyUrl,
+  resolveSystemProxyUrlForTargets,
   restoreOriginalProxyEnv,
   setSystemProxyEnabled,
 } from './libs/systemProxy';
@@ -89,7 +97,17 @@ import { loadOpenClawSessionPolicyConfig, saveOpenClawSessionPolicyConfig } from
 import { SkillManager } from './skillManager';
 import { getSkillServiceManager } from './skillServices';
 import { SqliteStore } from './sqliteStore';
+import { StartupProfiler } from './startupProfiler';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
+
+const gwDiagTs = (): string => {
+  const d = new Date();
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  const tz = d.getTimezoneOffset();
+  const sign = tz <= 0 ? '+' : '-';
+  const abs = Math.abs(tz);
+  return `[GW-RESTART-DIAG] ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`;
+};
 
 // 设置应用程序名称
 app.name = APP_NAME;
@@ -226,6 +244,18 @@ const buildAvailableOpenClawProviders = (): Record<string, { models: Array<{ id:
   return providerMap;
 };
 
+const normalizeOpenClawModelRef = (modelRef: string): string => {
+  const normalized = modelRef.trim();
+  if (!normalized) return normalized;
+
+  const qualification = resolveQualifiedAgentModelRef({
+    agentModel: normalized,
+    availableProviders: buildAvailableOpenClawProviders(),
+  });
+
+  return qualification.status === 'qualified' ? qualification.primaryModel : normalized;
+};
+
 // Provider IDs that were renamed in past refactors. Any stored agent model ref
 // using an old ID is rewritten to the current ID on startup.
 const RENAMED_PROVIDER_IDS: Record<string, string> = {
@@ -307,7 +337,7 @@ const resolveInlineAttachmentDir = (cwd?: string): string => {
       return path.join(resolved, '.cowork-temp', 'attachments', 'manual');
     }
   }
-  return path.join(app.getPath('temp'), 'metroai', 'attachments');
+  return path.join(app.getPath('temp'), 'lobsterai', 'attachments');
 };
 
 const ensurePngFileName = (value: string): string => {
@@ -324,8 +354,31 @@ const buildLogExportFileName = (): string => {
   const now = new Date();
   const datePart = `${now.getFullYear()}${padTwoDigits(now.getMonth() + 1)}${padTwoDigits(now.getDate())}`;
   const timePart = `${padTwoDigits(now.getHours())}${padTwoDigits(now.getMinutes())}${padTwoDigits(now.getSeconds())}`;
-  return `metroai-logs-${datePart}-${timePart}.zip`;
+  return `lobsterai-logs-${datePart}-${timePart}.zip`;
 };
+
+const OPENCLAW_DAILY_LOG_RETENTION_DAYS = 7;
+const OPENCLAW_DAILY_LOG_RE = /^openclaw-\d{4}-\d{2}-\d{2}\.log$/;
+
+function getRecentOpenClawDailyLogEntries(
+  logDir: string | null,
+): Array<{ archiveName: string; filePath: string }> {
+  if (!logDir || !fs.existsSync(logDir)) return [];
+
+  const cutoffMs = Date.now() - OPENCLAW_DAILY_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+  return fs.readdirSync(logDir)
+    .filter((f) => OPENCLAW_DAILY_LOG_RE.test(f))
+    .map((f) => ({ archiveName: f, filePath: path.join(logDir, f) }))
+    .filter(({ filePath }) => {
+      try {
+        return fs.statSync(filePath).mtimeMs >= cutoffMs;
+      } catch {
+        return false;
+      }
+    })
+    .sort((a, b) => a.archiveName.localeCompare(b.archiveName));
+}
 
 const truncateIpcString = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) return value;
@@ -505,8 +558,8 @@ const enableVerboseLogging =
   process.env.ELECTRON_ENABLE_LOGGING === '1' ||
   process.env.ELECTRON_ENABLE_LOGGING === 'true';
 const disableGpu =
-  process.env.METROAI_DISABLE_GPU === '1' ||
-  process.env.METROAI_DISABLE_GPU === 'true' ||
+  process.env.LOBSTERAI_DISABLE_GPU === '1' ||
+  process.env.LOBSTERAI_DISABLE_GPU === 'true' ||
   process.env.ELECTRON_DISABLE_GPU === '1' ||
   process.env.ELECTRON_DISABLE_GPU === 'true';
 const reloadOnChildProcessGone =
@@ -732,6 +785,7 @@ let mcpBridgeSecret: string = require('crypto').randomUUID();
 let mcpBridgeStartPromise: Promise<McpBridgeConfig | null> | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let storeInitPromise: Promise<SqliteStore> | null = null;
+let sqliteBackupManager: SqliteBackupManager | null = null;
 let openClawEngineManager: OpenClawEngineManager | null = null;
 let openClawConfigSync: OpenClawConfigSync | null = null;
 let openClawBootstrapPromise: Promise<OpenClawEngineStatus> | null = null;
@@ -739,6 +793,7 @@ let openClawStatusForwarderBound = false;
 let coworkRuntimeForwarderBound = false;
 let memoryMigrationDone = false;
 let preventSleepBlockerId: number | null = null;
+let appUpdateCoordinator: AppUpdateCoordinator | null = null;
 
 function setPreventSleepBlockerEnabled(enabled: boolean): void {
   if (enabled) {
@@ -760,10 +815,10 @@ const initStore = async (): Promise<SqliteStore> => {
       throw new Error('Store accessed before app is ready.');
     }
     // better-sqlite3 opens the database synchronously, so Promise.resolve() resolves
-    // immediately. The timeout acts as a safety net for future async changes or
-    // unexpected OS-level blocking (e.g., file lock on startup).
+    // immediately. The timeout acts as a safety net for unexpected OS-level
+    // blocking during store initialization and recovery.
     storeInitPromise = Promise.race([
-      Promise.resolve(SqliteStore.create(app.getPath('userData'))),
+      SqliteStore.create(app.getPath('userData')),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Store initialization timed out after 15s')), 15_000)
       ),
@@ -784,6 +839,13 @@ const getOpenClawEngineManager = (): OpenClawEngineManager => {
     openClawEngineManager = new OpenClawEngineManager();
   }
   return openClawEngineManager;
+};
+
+const getAppUpdateCoordinator = (): AppUpdateCoordinator => {
+  if (!appUpdateCoordinator) {
+    appUpdateCoordinator = new AppUpdateCoordinator(getStore());
+  }
+  return appUpdateCoordinator;
 };
 
 const forwardOpenClawStatus = (status: OpenClawEngineStatus): void => {
@@ -841,9 +903,9 @@ const bootstrapOpenClawEngine = async (options: { forceReinstall?: boolean; reas
       console.log(`[OpenClaw] bootstrap: MCP bridge setup done (${elapsed()}), result=${bridgeResult ? `${bridgeResult.tools.length} tools` : 'null'}`);
       console.log(`[OpenClaw] bootstrap: mcpBridgeServer=${mcpBridgeServer?.callbackUrl || 'null'}, mcpServerManager.tools=${mcpServerManager?.toolManifest?.length ?? 'null'}, secret=${mcpBridgeSecret ? 'set' : 'null'}`);
 
-      // Ensure IDENTITY.md has default content in the current workspace
+      // Ensure IDENTITY.md has default content in the main agent workspace
       try {
-        ensureDefaultIdentity(getCoworkStore().getConfig().workingDirectory);
+        ensureDefaultIdentity(getMainAgentWorkspacePath(manager.getStateDir()));
       } catch (err) {
         console.warn('[OpenClaw] bootstrap: ensureDefaultIdentity failed (non-fatal):', err);
       }
@@ -857,6 +919,7 @@ const bootstrapOpenClawEngine = async (options: { forceReinstall?: boolean; reas
         return syncResult.status || manager.getStatus();
       }
       if (options.forceReinstall) {
+        console.log(`${gwDiagTs()} bootstrap: forceReinstall requested, stopping gateway before reinstall`);
         await manager.stopGateway();
         console.log(`[OpenClaw] bootstrap: stopGateway done (${elapsed()})`);
       }
@@ -865,7 +928,7 @@ const bootstrapOpenClawEngine = async (options: { forceReinstall?: boolean; reas
       if (ensuredStatus.phase !== 'ready' && ensuredStatus.phase !== 'running') {
         return ensuredStatus;
       }
-      const result = await manager.startGateway();
+      const result = await manager.startGateway(`bootstrap:${reason}`);
       console.log(`[OpenClaw] bootstrap completed (${elapsed()}), phase=${result.phase}`);
       return result;
     } catch (error) {
@@ -923,7 +986,8 @@ const ensureOpenClawRunningForCowork = async () => {
     console.error('[OpenClaw] ensureRunning: config sync failed:', syncResult.error);
   }
 
-  return await manager.startGateway();
+  console.log(`${gwDiagTs()} ensureRunning: gateway not running (phase=${status.phase}), starting`);
+  return await manager.startGateway('ensure-running-for-cowork');
 };
 
 const getCoworkStore = () => {
@@ -946,8 +1010,36 @@ const getAgentManager = () => {
   return agentManager;
 };
 
+const isLobsteraiServerModelRef = (modelRef: string): boolean => {
+  const normalized = modelRef.trim();
+  if (!normalized) return false;
+
+  const parsed = parsePrimaryModelRef(normalized);
+  if (parsed) {
+    return parsed.providerId === ProviderName.LobsteraiServer;
+  }
+
+  return getAllServerModelMetadata().some((model) => model.modelId === normalized);
+};
+
+const shouldRefreshServerQuotaForSession = (sessionId: string): boolean => {
+  const session = getCoworkStore().getSession(sessionId);
+  const sessionModelRef = session?.modelOverride?.trim();
+  if (sessionModelRef) {
+    return isLobsteraiServerModelRef(sessionModelRef);
+  }
+
+  const agentModelRef = session?.agentId ? getAgentManager().getAgent(session.agentId)?.model?.trim() : '';
+  if (agentModelRef) {
+    return isLobsteraiServerModelRef(agentModelRef);
+  }
+
+  const apiConfig = resolveCurrentApiConfig();
+  return apiConfig.providerMetadata?.providerName === ProviderName.LobsteraiServer;
+};
+
 const resolveCoworkAgentEngine = (): CoworkAgentEngine => {
-  return getCoworkStore().getConfig().agentEngine;
+  return 'openclaw';
 };
 
 const getOpenClawConfigSync = (): OpenClawConfigSync => {
@@ -958,11 +1050,11 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
       isEnterprise: () => !!getStore().get('enterprise_config'),
       getOpenClawSessionPolicy: () => loadOpenClawSessionPolicyConfig(getStore()),
       getSkillsList: () => getSkillManager().listSkills().map(s => ({ id: s.id, enabled: s.enabled })),
-      getTelegramOpenClawConfig: () => {
+      getTelegramInstances: () => {
         try {
-          return getIMGatewayManager()?.getConfig()?.telegram ?? null;
+          return getIMGatewayManager().getIMStore().getTelegramInstances();
         } catch {
-          return null;
+          return [];
         }
       },
       getDingTalkInstances: () => {
@@ -993,18 +1085,25 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
           return [];
         }
       },
-      getPopoConfig: () => {
+      getPopoInstances: () => {
         try {
-          return getIMGatewayManager().getConfig().popo;
+          return getIMGatewayManager().getIMStore().getPopoInstances();
           } catch {
-          return null;
+          return [];
         }
       },
-      getNimConfig: () => {
+      getEmailOpenClawConfig: () => {
         try {
-          return getIMGatewayManager().getConfig().nim;
+          return getIMGatewayManager().getIMStore().getEmailConfig();
         } catch {
-          return null;
+          return { instances: [] };
+        }
+      },
+      getNimInstances: () => {
+        try {
+          return getIMGatewayManager().getIMStore().getNimInstances();
+        } catch {
+          return [];
         }
       },
       getNeteaseBeeChanConfig: () => {
@@ -1028,11 +1127,11 @@ const getOpenClawConfigSync = (): OpenClawConfigSync => {
           return null;
         }
       },
-      getDiscordOpenClawConfig: () => {
+      getDiscordInstances: () => {
         try {
-          return getIMGatewayManager()?.getConfig()?.discord ?? null;
+          return getIMGatewayManager()?.getIMStore()?.getDiscordInstances() ?? [];
         } catch {
-          return null;
+          return [];
         }
       },
       getMcpBridgeConfig: (): McpBridgeConfig | null => {
@@ -1079,7 +1178,7 @@ const clearDeferredRestart = () => {
 
 const executeDeferredGatewayRestart = async (reason: string) => {
   clearDeferredRestart();
-  console.log(`[OpenClaw] executeDeferredGatewayRestart: performing deferred restart (reason: ${reason})`);
+  console.log(`${gwDiagTs()} executeDeferredGatewayRestart: performing deferred restart (reason: ${reason})`);
   await syncOpenClawConfig({ reason: `deferred:${reason}` });
 };
 
@@ -1087,10 +1186,11 @@ const scheduleDeferredGatewayRestart = (reason: string) => {
   // If already scheduled, the latest config is already on disk — just let
   // the existing timer handle the restart.
   if (deferredRestartTimer) {
-    console.log(`[OpenClaw] scheduleDeferredGatewayRestart: already scheduled, skipping (reason: ${reason})`);
+    console.log(`${gwDiagTs()} scheduleDeferredGatewayRestart: already scheduled, skipping (reason: ${reason})`);
     return;
   }
 
+  console.log(`${gwDiagTs()} scheduleDeferredGatewayRestart: scheduling deferred restart, polling every ${DEFERRED_RESTART_POLL_MS}ms, max wait ${DEFERRED_RESTART_MAX_WAIT_MS}ms (reason: ${reason})`);
   deferredRestartTimer = setInterval(() => {
     if (!hasActiveGatewayWorkloads()) {
       void executeDeferredGatewayRestart(reason);
@@ -1099,7 +1199,7 @@ const scheduleDeferredGatewayRestart = (reason: string) => {
 
   // Hard timeout: restart anyway after max wait to avoid config drift.
   deferredRestartTimeout = setTimeout(() => {
-    console.warn(`[OpenClaw] scheduleDeferredGatewayRestart: max wait exceeded, forcing restart (reason: ${reason})`);
+    console.warn(`${gwDiagTs()} scheduleDeferredGatewayRestart: max wait exceeded, forcing restart (reason: ${reason})`);
     void executeDeferredGatewayRestart(reason);
   }, DEFERRED_RESTART_MAX_WAIT_MS);
 };
@@ -1107,13 +1207,13 @@ const scheduleDeferredGatewayRestart = (reason: string) => {
 const syncOpenClawConfig = async (
   options: { reason: string; restartGatewayIfRunning?: boolean } = { reason: 'unknown' },
 ): Promise<{ success: boolean; changed: boolean; mcpBridgeConfigChanged?: boolean; status?: OpenClawEngineStatus; error?: string }> => {
-  const D = '[GW-RESTART-DIAG]';
-  console.log(`${D} ──── syncOpenClawConfig START reason=${options.reason} restartIfRunning=${!!options.restartGatewayIfRunning}`);
+  const D = gwDiagTs;
+  console.log(`${D()} ──── syncOpenClawConfig START reason=${options.reason} restartIfRunning=${!!options.restartGatewayIfRunning}`);
 
   const syncResult = getOpenClawConfigSync().sync(options.reason);
-  console.log(`${D} sync() ok=${syncResult.ok} changed=${syncResult.changed} bindingsChanged=${!!syncResult.bindingsChanged}`);
+  console.log(`${D()} sync() ok=${syncResult.ok} changed=${syncResult.changed} bindingsChanged=${!!syncResult.bindingsChanged}`);
   if (!syncResult.ok) {
-    console.log(`${D} sync FAILED: ${syncResult.error}`);
+    console.log(`${D()} sync FAILED: ${syncResult.error}`);
     const status = getOpenClawEngineManager().setExternalError(
       `OpenClaw config sync failed: ${syncResult.error || 'unknown error'}`,
     );
@@ -1148,16 +1248,16 @@ const syncOpenClawConfig = async (
       else if (next === undefined) { removed.push(k); }
       else { modified.push(k); }
     }
-    console.log(`${D} SECRET ENV VARS CHANGED!`);
-    if (added.length) console.log(`${D}   added: ${added.join(', ')}`);
-    if (removed.length) console.log(`${D}   removed: ${removed.join(', ')}`);
+    console.log(`${D()} SECRET ENV VARS CHANGED!`);
+    if (added.length) console.log(`${D()}   added: ${added.join(', ')}`);
+    if (removed.length) console.log(`${D()}   removed: ${removed.join(', ')}`);
     for (const k of modified) {
       const p = (prevSecretEnvVars[k] || '').slice(0, 12);
       const n = (nextSecretEnvVars[k] || '').slice(0, 12);
-      console.log(`${D}   modified: ${k} prev=${p}… next=${n}…`);
+      console.log(`${D()}   modified: ${k} prev=${p}… next=${n}…`);
     }
   } else {
-    console.log(`${D} secretEnvVars unchanged (${Object.keys(nextSecretEnvVars).length} keys)`);
+    console.log(`${D()} secretEnvVars unchanged (${Object.keys(nextSecretEnvVars).length} keys)`);
   }
 
   // Force a hard restart when the mcp-bridge callbackUrl or tools changed,
@@ -1167,10 +1267,10 @@ const syncOpenClawConfig = async (
   const mcpBridgeForceRestart = !!syncResult.mcpBridgeConfigChanged;
   const needsHardRestart = secretEnvVarsChanged || syncResult.bindingsChanged || mcpBridgeForceRestart || (syncResult.changed && options.restartGatewayIfRunning);
 
-  console.log(`${D} needsHardRestart=${needsHardRestart} (envChanged=${secretEnvVarsChanged} bindingsChanged=${!!syncResult.bindingsChanged} mcpBridgeChanged=${mcpBridgeForceRestart} configChanged=${syncResult.changed} restartFlag=${!!options.restartGatewayIfRunning})`);
+  console.log(`${D()} needsHardRestart=${needsHardRestart} (envChanged=${secretEnvVarsChanged} bindingsChanged=${!!syncResult.bindingsChanged} mcpBridgeChanged=${mcpBridgeForceRestart} configChanged=${syncResult.changed} restartFlag=${!!options.restartGatewayIfRunning})`);
 
   if (!needsHardRestart) {
-    console.log(`${D} ──── NO RESTART, hot-reload only. reason=${options.reason}`);
+    console.log(`${D()} ──── NO RESTART, hot-reload only. reason=${options.reason}`);
     return {
       success: true,
       changed: syncResult.changed,
@@ -1181,7 +1281,7 @@ const syncOpenClawConfig = async (
   const manager = getOpenClawEngineManager();
   const status = manager.getStatus();
   if (status.phase !== 'running') {
-    console.log(`${D} ──── RESTART NEEDED but gateway not running (phase=${status.phase}), skipping. reason=${options.reason}`);
+    console.log(`${D()} ──── RESTART NEEDED but gateway not running (phase=${status.phase}), skipping. reason=${options.reason}`);
     return {
       success: true,
       changed: true,
@@ -1190,7 +1290,7 @@ const syncOpenClawConfig = async (
   }
 
   if (hasActiveGatewayWorkloads()) {
-    console.log(`${D} ──── RESTART DEFERRED (active workloads). reason=${options.reason}`);
+    console.log(`${D()} ──── RESTART DEFERRED (active workloads). reason=${options.reason}`);
     scheduleDeferredGatewayRestart(options.reason);
     return {
       success: true,
@@ -1199,13 +1299,13 @@ const syncOpenClawConfig = async (
     };
   }
 
-  console.log(`${D} ──── HARD RESTART EXECUTING. reason=${options.reason}`);
+  console.log(`${D()} ──── HARD RESTART EXECUTING. reason=${options.reason}, phase=${status.phase}, port=${status.message?.match(/loopback:(\d+)/)?.[1] ?? 'unknown'}`);
   if (openClawRuntimeAdapter) {
     openClawRuntimeAdapter.disconnectGatewayClient();
   }
 
   await manager.stopGateway();
-  const restarted = await manager.startGateway();
+  const restarted = await manager.startGateway(`config-sync:${options.reason}`);
   if (restarted.phase !== 'running') {
     return {
       success: false,
@@ -1277,6 +1377,18 @@ const bindCoworkRuntimeForwarder = (): void => {
       if (win.isDestroyed()) return;
       win.webContents.send('cowork:stream:complete', { sessionId, claudeSessionId });
     });
+    // If this session used a server model, notify renderer to refresh quota.
+    try {
+      if (shouldRefreshServerQuotaForSession(sessionId)) {
+        const windows = BrowserWindow.getAllWindows();
+        windows.forEach((win) => {
+          if (win.isDestroyed()) return;
+          win.webContents.send('auth:quotaChanged');
+        });
+      }
+    } catch {
+      // ignore
+    }
   });
 
   runtime.on('error', (sessionId: string, error: string) => {
@@ -1295,7 +1407,9 @@ const bindCoworkRuntimeForwarder = (): void => {
 const getCoworkEngineRouter = () => {
   if (!coworkEngineRouter) {
     if (!openClawRuntimeAdapter) {
-      openClawRuntimeAdapter = new OpenClawRuntimeAdapter(getCoworkStore(), getOpenClawEngineManager());
+      openClawRuntimeAdapter = new OpenClawRuntimeAdapter(getCoworkStore(), getOpenClawEngineManager(), {
+        normalizeModelRef: normalizeOpenClawModelRef,
+      });
       // Wire up channel session sync for IM conversations via OpenClaw
       try {
         const imManager = getIMGatewayManager();
@@ -1532,18 +1646,14 @@ const getIMGatewayManager = () => {
         coworkRuntime: runtime,
         coworkStore: store,
         ensureCoworkReady: async () => {
-          if (resolveCoworkAgentEngine() !== 'openclaw') {
-            return;
-          }
           const status = await ensureOpenClawRunningForCowork();
           if (status.phase !== 'running') {
             throw new Error(status.message || 'AI engine is initializing. Please try again in a moment.');
           }
         },
-        isOpenClawEngine: () => resolveCoworkAgentEngine() === 'openclaw',
-        syncOpenClawConfig: async () => {
+        syncOpenClawConfig: async (reason?: string) => {
           await syncOpenClawConfig({
-            reason: 'im-gateway-start',
+            reason: reason || 'im-gateway-sync',
           });
         },
         ensureOpenClawGatewayConnected: async () => {
@@ -1691,11 +1801,10 @@ const getIMGatewayManager = () => {
 };
 
 function mergeCoworkSystemPrompt(
-  engine: CoworkAgentEngine,
   systemPrompt?: string,
 ): string | undefined {
   const sections = [
-    buildScheduledTaskEnginePrompt(engine),
+    buildScheduledTaskEnginePrompt(),
     systemPrompt?.trim() || '',
   ].filter(Boolean);
   return sections.length > 0 ? sections.join('\n\n') : undefined;
@@ -1730,10 +1839,17 @@ type AppConfigSettings = {
   theme?: string;
   language?: string;
   useSystemProxy?: boolean;
+  sqliteAutoBackupEnabled?: boolean;
 };
 
 const getUseSystemProxyFromConfig = (config?: { useSystemProxy?: boolean }): boolean => {
   return config?.useSystemProxy === true;
+};
+
+const getSqliteAutoBackupEnabledFromConfig = (
+  config?: { sqliteAutoBackupEnabled?: boolean },
+): boolean => {
+  return config?.sqliteAutoBackupEnabled === true;
 };
 
 const resolveThemeFromConfig = (config?: AppConfigSettings): 'light' | 'dark' => {
@@ -1773,13 +1889,13 @@ const updateTitleBarOverlay = () => {
 };
 
 const applyProxyPreference = async (useSystemProxy: boolean): Promise<void> => {
+  setSystemProxyEnabled(useSystemProxy);
+
   try {
     await session.defaultSession.setProxy({ mode: useSystemProxy ? 'system' : 'direct' });
   } catch (error) {
     console.error('[Main] Failed to apply session proxy mode:', error);
   }
-
-  setSystemProxyEnabled(useSystemProxy);
 
   if (!useSystemProxy) {
     restoreOriginalProxyEnv();
@@ -1787,11 +1903,11 @@ const applyProxyPreference = async (useSystemProxy: boolean): Promise<void> => {
     return;
   }
 
-  const proxyUrl = await resolveSystemProxyUrl('https://openrouter.ai');
+  const { proxyUrl, targetUrl } = await resolveSystemProxyUrlForTargets();
   applySystemProxyEnv(proxyUrl);
 
   if (proxyUrl) {
-    console.log('[Main] System proxy enabled for process env:', proxyUrl);
+    console.log(`[Main] System proxy enabled for process env via ${targetUrl}:`, proxyUrl);
   } else {
     console.warn('[Main] System proxy mode enabled, but no proxy endpoint was resolved (DIRECT).');
   }
@@ -1876,6 +1992,11 @@ if (!gotTheLock) {
     }
   };
 
+  ipcMain.on('log:fromRenderer', (_event, level: string, tag: string, message: string) => {
+    const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+    fn(`[Renderer][${tag}] ${message}`);
+  });
+
   // Allow renderer to retrieve a buffered auth code on init
   ipcMain.handle('auth:getPendingCallback', () => {
     const code = pendingAuthCode;
@@ -1914,6 +2035,7 @@ if (!gotTheLock) {
   ipcMain.handle('store:set', async (_event, key, value) => {
     getStore().set(key, value);
     if (key === 'app_config') {
+      refreshEndpointsTestMode(getStore());
       const syncResult = await syncOpenClawConfig({
         reason: 'app-config-change',
         restartGatewayIfRunning: false,
@@ -1980,11 +2102,17 @@ if (!gotTheLock) {
       }
 
       const outputPath = ensureZipFileName(saveResult.filePath);
+      const manager = getOpenClawEngineManager();
       const archiveResult = await exportLogsZip({
         outputPath,
         entries: [
           ...getRecentMainLogEntries(),
           { archiveName: 'cowork.log', filePath: getCoworkLogPath() },
+          ...manager.getRecentGatewayLogEntries(),
+          ...getRecentOpenClawDailyLogEntries(manager.getOpenClawDailyLogDir()),
+          ...(process.platform === 'win32'
+            ? [{ archiveName: 'install-timing.log', filePath: path.join(app.getPath('appData'), 'MetroAI', 'install-timing.log') }]
+            : []),
         ],
       });
 
@@ -2174,7 +2302,8 @@ if (!gotTheLock) {
   ipcMain.handle('auth:login', async (_event, { loginUrl }: { loginUrl?: string } = {}) => {
     try {
       if (!loginUrl) return { success: false, error: 'No login URL provided' };
-      const finalUrl = `${loginUrl}?source=electron`;
+      const baseUrl = loginUrl;
+      const finalUrl = `${baseUrl}?source=electron`;
       await shell.openExternal(finalUrl);
       return { success: true };
     } catch (error) {
@@ -2236,11 +2365,12 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:delete', (_event, id: string) => {
+  ipcMain.handle('skills:delete', async (_event, id: string) => {
     try {
-      const skills = getSkillManager().deleteSkill(id);
+      const skills = await getSkillManager().deleteSkill(id);
       return { success: true, skills };
     } catch (error) {
+      console.error('[skills] Failed to delete skill:', id, error);
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete skill' };
     }
   });
@@ -2296,6 +2426,33 @@ if (!gotTheLock) {
     config: Record<string, string>
   ) => {
     return getSkillManager().testEmailConnectivity(skillId, config);
+  });
+
+  ipcMain.handle('skills:fetchMarketplace', async () => {
+    const url = getSkillStoreUrl();
+    console.log(`[SkillMarketplace] fetching from: ${url}`);
+    try {
+      const https = await import('https');
+      const data = await new Promise<string>((resolve, reject) => {
+        const req = https.get(url, { timeout: 10000 }, (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            res.resume();
+            return;
+          }
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => { body += chunk; });
+          res.on('end', () => resolve(body));
+          res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+      });
+      return { success: true, data };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to fetch skill marketplace' };
+    }
   });
 
   ipcMain.handle('openclaw:engine:getStatus', async () => {
@@ -2355,13 +2512,15 @@ if (!gotTheLock) {
 
   let restartGatewayPromise: Promise<OpenClawEngineStatus> | null = null;
   ipcMain.handle('openclaw:engine:restartGateway', async () => {
+    console.log(`${gwDiagTs()} IPC openclaw:engine:restartGateway: manual restart requested from renderer`);
     if (restartGatewayPromise) {
+      console.log(`${gwDiagTs()} IPC openclaw:engine:restartGateway: restart already in progress, joining existing promise`);
       const status = await restartGatewayPromise;
       return { success: status.phase === 'running' || status.phase === 'ready', status };
     }
     try {
       const manager = getOpenClawEngineManager();
-      restartGatewayPromise = manager.restartGateway();
+      restartGatewayPromise = manager.restartGateway('ipc-manual');
       const status = await restartGatewayPromise;
       return {
         success: status.phase === 'running' || status.phase === 'ready',
@@ -2505,20 +2664,17 @@ if (!gotTheLock) {
     activeSkillIds?: string[];
     imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
     agentId?: string;
+    modelOverride?: string;
   }) => {
     try {
-      const activeEngine = resolveCoworkAgentEngine();
-      if (activeEngine === 'openclaw') {
-        const engineStatus = await ensureOpenClawRunningForCowork();
-        if (engineStatus.phase !== 'running') {
-          return getEngineNotReadyResponse(engineStatus);
-        }
+      const engineStatus = await ensureOpenClawRunningForCowork();
+      if (engineStatus.phase !== 'running') {
+        return getEngineNotReadyResponse(engineStatus);
       }
 
       const coworkStoreInstance = getCoworkStore();
       const config = coworkStoreInstance.getConfig();
       const systemPrompt = mergeCoworkSystemPrompt(
-        activeEngine,
         options.systemPrompt ?? config.systemPrompt,
       );
       const selectedWorkspaceRoot = (options.cwd || config.workingDirectory || '').trim();
@@ -2530,8 +2686,10 @@ if (!gotTheLock) {
         };
       }
 
-      // Generate title from first line of prompt
-      const fallbackTitle = options.prompt.split('\n')[0].slice(0, 50) || 'New Session';
+      const fallbackTitle = buildSessionTitleFromInput(
+        options.prompt,
+        t('coworkDefaultSessionTitle')
+      );
       const title = options.title?.trim() || fallbackTitle;
       const taskWorkingDirectory = resolveTaskWorkingDirectory(selectedWorkspaceRoot);
 
@@ -2541,8 +2699,13 @@ if (!gotTheLock) {
         systemPrompt,
         config.executionMode || 'local',
         options.activeSkillIds || [],
-        options.agentId || 'main'
+        options.agentId || 'main',
+        options.modelOverride || ''
       );
+
+      if (options.modelOverride) {
+        console.log('[Cowork:StartSession] session created with modelOverride:', session.id, options.modelOverride);
+      }
 
       // Update session status to 'running' before starting async task
       // This ensures the frontend receives the correct status immediately
@@ -2554,6 +2717,14 @@ if (!gotTheLock) {
         messageMetadata.skillIds = options.activeSkillIds;
       }
       if (options.imageAttachments?.length) {
+        console.log('[Cowork:StartSession] imageAttachments received via IPC:', {
+          count: options.imageAttachments.length,
+          details: options.imageAttachments.map(img => ({
+            name: img.name,
+            mimeType: img.mimeType,
+            base64Length: img.base64Data?.length ?? 0,
+          })),
+        });
         messageMetadata.imageAttachments = options.imageAttachments;
       }
       coworkStoreInstance.addMessage(session.id, {
@@ -2616,19 +2787,26 @@ if (!gotTheLock) {
     imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
   }) => {
     try {
-      const activeEngine = resolveCoworkAgentEngine();
-      if (activeEngine === 'openclaw') {
-        const engineStatus = await ensureOpenClawRunningForCowork();
-        if (engineStatus.phase !== 'running') {
-          return getEngineNotReadyResponse(engineStatus);
-        }
+      const engineStatus = await ensureOpenClawRunningForCowork();
+      if (engineStatus.phase !== 'running') {
+        return getEngineNotReadyResponse(engineStatus);
       }
 
       const runtime = getCoworkEngineRouter();
       const existingSession = getCoworkStore().getSession(options.sessionId);
+      if (options.imageAttachments?.length) {
+        console.log('[Cowork:ContinueSession] imageAttachments received via IPC:', {
+          sessionId: options.sessionId,
+          count: options.imageAttachments.length,
+          details: options.imageAttachments.map(img => ({
+            name: img.name,
+            mimeType: img.mimeType,
+            base64Length: img.base64Data?.length ?? 0,
+          })),
+        });
+      }
       runtime.continueSession(options.sessionId, options.prompt, {
         systemPrompt: mergeCoworkSystemPrompt(
-          activeEngine,
           options.systemPrompt ?? existingSession?.systemPrompt,
         ),
         skillIds: options.activeSkillIds,
@@ -2825,7 +3003,9 @@ if (!gotTheLock) {
       const agent = getAgentManager().createAgent(request, resolveDefaultAgentModelRef());
       // Sync config so workspace files (SOUL.md, IDENTITY.md) are written
       // before OpenClaw scaffolds default templates for the new agent.
-      syncOpenClawConfig({ reason: 'agent-created' }).catch(() => {});
+      syncOpenClawConfig({ reason: 'agent-created' }).catch((err) => {
+        console.error('[OpenClaw] config sync after agent-created failed:', err);
+      });
       return { success: true, agent };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to create agent' };
@@ -2835,7 +3015,9 @@ if (!gotTheLock) {
   ipcMain.handle('agents:update', async (_event, id: string, updates: import('./coworkStore').UpdateAgentRequest) => {
     try {
       const agent = getAgentManager().updateAgent(id, updates);
-      syncOpenClawConfig({ reason: 'agent-updated' }).catch(() => {});
+      syncOpenClawConfig({ reason: 'agent-updated' }).catch((err) => {
+        console.error('[OpenClaw] config sync after agent-updated failed:', err);
+      });
       return { success: true, agent };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update agent' };
@@ -2870,7 +3052,9 @@ if (!gotTheLock) {
         // IM store may not be initialised yet; safe to ignore.
       }
 
-      syncOpenClawConfig({ reason: 'agent-deleted' }).catch(() => {});
+      syncOpenClawConfig({ reason: 'agent-deleted' }).catch((err) => {
+        console.error('[OpenClaw] config sync after agent-deleted failed:', err);
+      });
       return { success: true, deleted: result };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete agent' };
@@ -2889,7 +3073,9 @@ if (!gotTheLock) {
   ipcMain.handle('agents:addPreset', async (_event, presetId: string) => {
     try {
       const agent = getAgentManager().addPresetAgent(presetId, resolveDefaultAgentModelRef());
-      syncOpenClawConfig({ reason: 'agent-preset-added' }).catch(() => {});
+      syncOpenClawConfig({ reason: 'agent-preset-added' }).catch((err) => {
+        console.error('[OpenClaw] config sync after agent-preset-added failed:', err);
+      });
       return { success: true, agent };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to add preset agent' };
@@ -3109,6 +3295,9 @@ if (!gotTheLock) {
       }
 
       const patch = sanitizeOpenClawSessionPatch(request.patch);
+      if (patch.model) {
+        patch.model = normalizeOpenClawModelRef(patch.model);
+      }
       const runtime = getCoworkEngineRouter();
       await runtime.patchSession(sessionId, patch);
 
@@ -3143,8 +3332,7 @@ if (!gotTheLock) {
     offset?: number;
   }) => {
     try {
-      const config = getCoworkStore().getConfig();
-      const filePath = resolveMemoryFilePath(config.workingDirectory);
+      const filePath = resolveMemoryFilePath(getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir()));
 
       // Lazy migration: SQLite → MEMORY.md (one-time, cached in memory)
       if (!memoryMigrationDone) {
@@ -3181,8 +3369,7 @@ if (!gotTheLock) {
     isExplicit?: boolean;
   }) => {
     try {
-      const config = getCoworkStore().getConfig();
-      const filePath = resolveMemoryFilePath(config.workingDirectory);
+      const filePath = resolveMemoryFilePath(getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir()));
       const entry = addMemoryEntry(filePath, input.text);
       return { success: true, entry };
     } catch (error) {
@@ -3200,8 +3387,7 @@ if (!gotTheLock) {
     isExplicit?: boolean;
   }) => {
     try {
-      const config = getCoworkStore().getConfig();
-      const filePath = resolveMemoryFilePath(config.workingDirectory);
+      const filePath = resolveMemoryFilePath(getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir()));
       if (!input.text) {
         return { success: false, error: 'Memory text is required' };
       }
@@ -3221,8 +3407,7 @@ if (!gotTheLock) {
     id: string;
   }) => {
     try {
-      const config = getCoworkStore().getConfig();
-      const filePath = resolveMemoryFilePath(config.workingDirectory);
+      const filePath = resolveMemoryFilePath(getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir()));
       const success = deleteMemoryEntry(filePath, input.id);
       return success
         ? { success: true }
@@ -3236,8 +3421,7 @@ if (!gotTheLock) {
   });
   ipcMain.handle('cowork:memory:getStats', async () => {
     try {
-      const config = getCoworkStore().getConfig();
-      const filePath = resolveMemoryFilePath(config.workingDirectory);
+      const filePath = resolveMemoryFilePath(getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir()));
       const entries = readMemoryEntries(filePath);
       return {
         success: true,
@@ -3259,8 +3443,8 @@ if (!gotTheLock) {
   });
   ipcMain.handle('cowork:bootstrap:read', async (_event, filename: string) => {
     try {
-      const config = getCoworkStore().getConfig();
-      const content = readBootstrapFile(config.workingDirectory, filename);
+      const mainWorkspace = getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir());
+      const content = readBootstrapFile(mainWorkspace, filename);
       return { success: true, content };
     } catch (error) {
       return {
@@ -3272,8 +3456,8 @@ if (!gotTheLock) {
   });
   ipcMain.handle('cowork:bootstrap:write', async (_event, filename: string, content: string) => {
     try {
-      const config = getCoworkStore().getConfig();
-      writeBootstrapFile(config.workingDirectory, filename, content);
+      const mainWorkspace = getMainAgentWorkspacePath(getOpenClawEngineManager().getStateDir());
+      writeBootstrapFile(mainWorkspace, filename, content);
       return { success: true };
     } catch (error) {
       return {
@@ -3282,6 +3466,38 @@ if (!gotTheLock) {
       };
     }
   });
+
+  const VALID_EMBEDDING_PROVIDERS = ['local', 'openai', 'gemini', 'voyage', 'mistral', 'ollama'] as const;
+
+  function normalizeEmbeddingConfig(config: {
+    embeddingEnabled?: boolean;
+    embeddingProvider?: string;
+    embeddingModel?: string;
+    embeddingLocalModelPath?: string;
+    embeddingVectorWeight?: number;
+    embeddingRemoteBaseUrl?: string;
+    embeddingRemoteApiKey?: string;
+  }) {
+    return {
+      embeddingEnabled: typeof config.embeddingEnabled === 'boolean'
+        ? config.embeddingEnabled : undefined,
+      embeddingProvider: typeof config.embeddingProvider === 'string'
+        && (VALID_EMBEDDING_PROVIDERS as readonly string[]).includes(config.embeddingProvider)
+        ? config.embeddingProvider : undefined,
+      embeddingModel: typeof config.embeddingModel === 'string'
+        ? config.embeddingModel.trim() : undefined,
+      embeddingLocalModelPath: typeof config.embeddingLocalModelPath === 'string'
+        ? config.embeddingLocalModelPath.trim() : undefined,
+      embeddingVectorWeight: typeof config.embeddingVectorWeight === 'number'
+        && Number.isFinite(config.embeddingVectorWeight)
+        ? Math.max(0, Math.min(1, config.embeddingVectorWeight)) : undefined,
+      embeddingRemoteBaseUrl: typeof config.embeddingRemoteBaseUrl === 'string'
+        ? config.embeddingRemoteBaseUrl.trim() : undefined,
+      embeddingRemoteApiKey: typeof config.embeddingRemoteApiKey === 'string'
+        ? config.embeddingRemoteApiKey.trim() : undefined,
+    };
+  }
+
   ipcMain.handle('cowork:config:set', async (_event, config: {
     workingDirectory?: string;
     executionMode?: 'auto' | 'local' | 'sandbox';
@@ -3292,6 +3508,13 @@ if (!gotTheLock) {
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
     skipMissedJobs?: boolean;
+    embeddingEnabled?: boolean;
+    embeddingProvider?: string;
+    embeddingModel?: string;
+    embeddingLocalModelPath?: string;
+    embeddingVectorWeight?: number;
+    embeddingRemoteBaseUrl?: string;
+    embeddingRemoteApiKey?: string;
   }) => {
     try {
       const normalizedExecutionMode =
@@ -3325,6 +3548,7 @@ if (!gotTheLock) {
       const normalizedSkipMissedJobs = typeof config.skipMissedJobs === 'boolean'
         ? config.skipMissedJobs
         : undefined;
+      const normalizedEmbedding = normalizeEmbeddingConfig(config);
       const normalizedConfig: Parameters<CoworkStore['setConfig']>[0] = {
         ...config,
         executionMode: normalizedExecutionMode,
@@ -3335,35 +3559,24 @@ if (!gotTheLock) {
         memoryGuardLevel: normalizedMemoryGuardLevel,
         memoryUserMemoriesMaxItems: normalizedMemoryUserMemoriesMaxItems,
         skipMissedJobs: normalizedSkipMissedJobs,
+        ...normalizedEmbedding,
       };
       const previousConfig = getCoworkStore().getConfig();
       const previousWorkingDir = previousConfig.workingDirectory;
       getCoworkStore().setConfig(normalizedConfig);
       if (normalizedConfig.workingDirectory !== undefined && normalizedConfig.workingDirectory !== previousWorkingDir) {
         getSkillManager().handleWorkingDirectoryChange();
-        // Sync MEMORY.md to new workspace directory
-        const syncResult = syncMemoryFileOnWorkspaceChange(previousWorkingDir, normalizedConfig.workingDirectory);
-        if (syncResult.error) {
-          console.warn('[OpenClaw Memory] Workspace sync failed:', syncResult.error);
-        }
-        // Ensure IDENTITY.md has default content in the new workspace
-        try {
-          ensureDefaultIdentity(normalizedConfig.workingDirectory);
-        } catch (err) {
-          console.warn('[OpenClaw] ensureDefaultIdentity failed (non-fatal):', err);
-        }
+        // Main agent workspace is decoupled from workingDirectory — no MEMORY.md
+        // or IDENTITY.md sync needed here. The workspace is always at
+        // {STATE_DIR}/workspace-main/ regardless of the user's working directory.
       }
 
       const nextConfig = getCoworkStore().getConfig();
-      if (normalizedAgentEngine !== undefined && normalizedAgentEngine !== previousConfig.agentEngine) {
-        getCoworkEngineRouter().handleEngineConfigChanged(normalizedAgentEngine);
-      }
-      const switchedToOpenClaw = normalizedAgentEngine === 'openclaw'
-        && previousConfig.agentEngine !== 'openclaw';
 
       const shouldSyncOpenClawConfig = normalizedExecutionMode !== undefined
         || normalizedAgentEngine !== undefined
-        || (normalizedConfig.workingDirectory !== undefined && normalizedConfig.workingDirectory !== previousWorkingDir);
+        || normalizedConfig.workingDirectory !== undefined
+        || Object.values(normalizedEmbedding).some(v => v !== undefined);
       if (shouldSyncOpenClawConfig) {
         const syncResult = await syncOpenClawConfig({
           reason: 'cowork-config-change',
@@ -3378,11 +3591,6 @@ if (!gotTheLock) {
         }
       }
 
-      if (switchedToOpenClaw) {
-        void ensureOpenClawRunningForCowork().catch((error) => {
-          console.error('[OpenClaw] Failed to auto-start gateway after engine switch:', error);
-        });
-      }
       return { success: true };
     } catch (error) {
       return {
@@ -3421,6 +3629,11 @@ if (!gotTheLock) {
       ) => getIMGatewayManager().primeConversationReplyRoute(platform as Platform, conversationId, coworkSessionId),
     }),
     getOpenClawRuntimeAdapter: () => openClawRuntimeAdapter,
+  });
+
+  registerNimQrLoginHandlers({
+    startNimQrLogin,
+    pollNimQrLogin,
   });
 
   // ==================== Permissions IPC Handlers ====================
@@ -3625,12 +3838,6 @@ if (!gotTheLock) {
   ipcMain.handle('im:weixin:qr-login-wait', async (_event, accountId?: string) => {
     try {
       const result = await getIMGatewayManager().weixinQrLoginWait(accountId);
-      if (result.connected) {
-        // Restart gateway so the plugin picks up the new token and starts
-        // a fresh monitor loop (the old one may be stuck in a session pause).
-        console.log('[IMGatewayManager] Weixin login succeeded, restarting OpenClaw gateway');
-        await getOpenClawEngineManager().restartGateway();
-      }
       return { success: true, ...result };
     } catch (error) {
       return { success: false, connected: false, message: error instanceof Error ? error.message : 'Weixin QR login failed' };
@@ -3653,6 +3860,55 @@ if (!gotTheLock) {
       return result;
     } catch (error) {
       return { success: false, message: error instanceof Error ? error.message : 'POPO QR login poll failed' };
+    }
+  });
+
+  ipcMain.handle('im:popo:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_POPO_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'POPO Bot',
+      };
+      getIMGatewayManager().getIMStore().setPopoInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add POPO instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:popo:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deletePopoInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete POPO instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:popo:instance:config:set', async (_event, instanceId: string, config: Record<string, unknown>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setPopoInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set POPO instance config',
+      };
     }
   });
 
@@ -3687,6 +3943,68 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get OpenClaw config schema',
+      };
+    }
+  });
+
+  // Email: Test connection
+  ipcMain.handle('email:testConnection', async (event, { instanceId }: { instanceId: string }) => {
+    try {
+      const imManager = getIMGatewayManager();
+      const imStore = imManager.getIMStore();
+      const emailConfig = imStore.getEmailConfig();
+      const instance = emailConfig.instances.find(i => i.instanceId === instanceId);
+
+      if (!instance) {
+        throw new Error('Instance not found');
+      }
+
+      if (instance.transport === 'imap') {
+        // Test IMAP connection using node-imap
+
+        let Imap: new (config: Record<string, unknown>) => any;
+        try {
+          Imap = require('imap');
+        } catch {
+          throw new Error('IMAP module not installed. Please install the imap package.');
+        }
+        const deriveImapHost = (email: string) => {
+          const domain = email.split('@')[1];
+          return `imap.${domain}`;
+        };
+
+        const connection = new Imap({
+          user: instance.email,
+          password: instance.password,
+          host: instance.imapHost || deriveImapHost(instance.email),
+          port: instance.imapPort || 993,
+          tls: true,
+        });
+
+        await new Promise<void>((resolve, reject) => {
+          connection.once('ready', () => {
+            connection.end();
+            resolve();
+          });
+          connection.once('error', reject);
+          connection.connect();
+        });
+      } else if (instance.transport === 'ws') {
+        // Test WebSocket connection by fetching token
+        let fetchIMToken: (apiKey: string, email: string, logger: typeof console) => Promise<unknown>;
+        try {
+          ({ fetchIMToken } = require('@clawemail/node-sdk'));
+        } catch {
+          throw new Error('Email SDK not installed. Please install the @clawemail/node-sdk package.');
+        }
+        await fetchIMToken(instance.apiKey!, instance.email, console);
+      }
+
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   });
@@ -3794,6 +4112,56 @@ if (!gotTheLock) {
     }
   });
 
+  // NIM Multi-Instance handlers
+  ipcMain.handle('im:nim:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_NIM_OPENCLAW_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'NIM Bot',
+      };
+      getIMGatewayManager().getIMStore().setNimInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add NIM instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:nim:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deleteNimInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete NIM instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:nim:instance:config:set', async (_event, instanceId: string, config: Partial<NimInstanceConfig>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setNimInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set NIM instance config',
+      };
+    }
+  });
+
   // QQ Multi-Instance handlers
   ipcMain.handle('im:qq:instance:add', async (_event, name: string) => {
     try {
@@ -3894,6 +4262,28 @@ if (!gotTheLock) {
     }
   });
 
+  // Email Multi-Instance handlers
+  ipcMain.handle('im:email:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_EMAIL_INSTANCE_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'Email',
+        email: '',
+        agentId: 'main',
+      };
+      getIMGatewayManager().getIMStore().setEmailInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add email instance',
+      };
+    }
+  });
+
   // WeCom Multi-Instance handlers
   ipcMain.handle('im:wecom:instance:add', async (_event, name: string) => {
     try {
@@ -3914,6 +4304,21 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('im:email:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deleteEmailInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete email instance',
+      };
+    }
+  });
+
   ipcMain.handle('im:wecom:instance:delete', async (_event, instanceId: string) => {
     try {
       getIMGatewayManager().getIMStore().deleteWecomInstance(instanceId);
@@ -3929,6 +4334,21 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('im:email:instance:config:set', async (_event, instanceId: string, config: Partial<EmailMultiInstanceConfig['instances'][number]>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setEmailInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set email instance config',
+      };
+    }
+  });
+
   ipcMain.handle('im:wecom:instance:config:set', async (_event, instanceId: string, config: Partial<WecomInstanceConfig>, options?: { syncGateway?: boolean }) => {
     try {
       getIMGatewayManager().getIMStore().setWecomInstanceConfig(instanceId, config);
@@ -3940,6 +4360,106 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set WeCom instance config',
+      };
+    }
+  });
+
+  // Telegram Multi-Instance handlers
+  ipcMain.handle('im:telegram:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_TELEGRAM_OPENCLAW_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'Telegram Bot',
+      };
+      getIMGatewayManager().getIMStore().setTelegramInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add Telegram instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:telegram:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deleteTelegramInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete Telegram instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:telegram:instance:config:set', async (_event, instanceId: string, config: Partial<TelegramInstanceConfig>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setTelegramInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set Telegram instance config',
+      };
+    }
+  });
+
+  // Discord Multi-Instance handlers
+  ipcMain.handle('im:discord:instance:add', async (_event, name: string) => {
+    try {
+      const instanceId = crypto.randomUUID();
+      const { DEFAULT_DISCORD_OPENCLAW_CONFIG: defaults } = await import('./im/types');
+      const instance = {
+        ...defaults,
+        instanceId,
+        instanceName: name || 'Discord Bot',
+      };
+      getIMGatewayManager().getIMStore().setDiscordInstanceConfig(instanceId, instance);
+      return { success: true, instance };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add Discord instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:discord:instance:delete', async (_event, instanceId: string) => {
+    try {
+      getIMGatewayManager().getIMStore().deleteDiscordInstance(instanceId);
+      if (getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete Discord instance',
+      };
+    }
+  });
+
+  ipcMain.handle('im:discord:instance:config:set', async (_event, instanceId: string, config: Partial<DiscordInstanceConfig>, options?: { syncGateway?: boolean }) => {
+    try {
+      getIMGatewayManager().getIMStore().setDiscordInstanceConfig(instanceId, config);
+      if (options?.syncGateway && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set Discord instance config',
       };
     }
   });
@@ -3964,6 +4484,31 @@ if (!gotTheLock) {
   ipcMain.handle('feishu:install:verify', async (_event, { appId, appSecret }: { appId: string; appSecret: string }) => {
     try {
       return await getIMGatewayManager().verifyFeishuCredentials(appId, appSecret);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : '验证失败' };
+    }
+  });
+
+  // DingTalk bot install helpers
+  ipcMain.handle('dingtalk:install:qrcode', async () => {
+    try {
+      return await getIMGatewayManager().startDingTalkInstallQrcode();
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : '获取二维码失败');
+    }
+  });
+
+  ipcMain.handle('dingtalk:install:poll', async (_event, { deviceCode }: { deviceCode: string }) => {
+    try {
+      return await getIMGatewayManager().pollDingTalkInstall(deviceCode);
+    } catch (error) {
+      return { done: false, error: error instanceof Error ? error.message : '轮询失败' };
+    }
+  });
+
+  ipcMain.handle('dingtalk:install:verify', async (_event, { clientId, clientSecret }: { clientId: string; clientSecret: string }) => {
+    try {
+      return await getIMGatewayManager().verifyDingTalkCredentials(clientId, clientSecret);
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : '验证失败' };
     }
@@ -4021,8 +4566,52 @@ if (!gotTheLock) {
     }
   });
 
+  // OpenAI ChatGPT (Codex) OAuth handlers — see src/main/libs/openaiCodexAuth.ts.
+  // The login flow opens a browser to https://auth.openai.com/oauth/authorize
+  // and listens on http://127.0.0.1:1455/auth/callback for the redirect, then
+  // writes <CODEX_HOME>/auth.json so the OpenClaw runtime can pick it up.
+  ipcMain.handle('openai-codex-oauth:start', async () => {
+    const { startOpenAICodexLogin } = await import('./libs/openaiCodexAuth');
+    try {
+      const tokens = await startOpenAICodexLogin();
+      return {
+        success: true as const,
+        email: tokens.email ?? null,
+        accountId: tokens.accountId ?? null,
+        expiresAt: tokens.expiresAt,
+      };
+    } catch (error) {
+      return {
+        success: false as const,
+        error: error instanceof Error ? error.message : 'ChatGPT login failed',
+      };
+    }
+  });
+
+  ipcMain.handle('openai-codex-oauth:cancel', async () => {
+    const { cancelOpenAICodexLogin } = await import('./libs/openaiCodexAuth');
+    cancelOpenAICodexLogin();
+  });
+
+  ipcMain.handle('openai-codex-oauth:logout', async () => {
+    const { logoutOpenAICodex } = await import('./libs/openaiCodexAuth');
+    logoutOpenAICodex();
+  });
+
+  ipcMain.handle('openai-codex-oauth:status', async () => {
+    const { readOpenAICodexAuthFile } = await import('./libs/openaiCodexAuth');
+    const tokens = readOpenAICodexAuthFile();
+    if (!tokens) return { loggedIn: false as const };
+    return {
+      loggedIn: true as const,
+      email: tokens.email ?? null,
+      accountId: tokens.accountId ?? null,
+      expiresAt: tokens.expiresAt,
+    };
+  });
+
   ipcMain.handle('generate-session-title', async (_event, userInput: string | null) => {
-    return generateSessionTitle(userInput);
+    return generateSessionTitle(userInput, t('coworkDefaultSessionTitle'));
   });
 
   ipcMain.handle('get-recent-cwds', async (_event, limit?: number) => {
@@ -4108,6 +4697,20 @@ if (!gotTheLock) {
     }
     return { success: true, paths: result.filePaths };
   });
+
+  ipcMain.handle(
+    'dialog:showMessageBox',
+    async (event, options: { message: string; type?: 'none' | 'info' | 'error' | 'question' | 'warning'; title?: string }) => {
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const { dialog } = await import('electron');
+      return dialog.showMessageBox(ownerWindow!, {
+        type: options.type || 'warning',
+        title: options.title || '',
+        message: options.message,
+        buttons: ['OK'],
+      });
+    }
+  );
 
   ipcMain.handle(
     'dialog:saveInlineFile',
@@ -4236,37 +4839,26 @@ if (!gotTheLock) {
     }
   });
 
-  // App update download & install
-  ipcMain.handle('appUpdate:download', async (event, url: string) => {
-    // Block downloads in enterprise mode
-    const enterprise = getStore().get<{ disableUpdate?: boolean }>('enterprise_config');
-    if (enterprise?.disableUpdate) {
-      return { success: false, error: 'Updates are managed by enterprise' };
-    }
-    try {
-      const filePath = await downloadUpdate(url, (progress) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('appUpdate:downloadProgress', progress);
-        }
-      });
-      return { success: true, filePath };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Download failed' };
-    }
+  ipcMain.handle(AppUpdateIpc.GetState, async () => {
+    return getAppUpdateCoordinator().getState();
   });
 
-  ipcMain.handle('appUpdate:cancelDownload', async () => {
-    const cancelled = cancelActiveDownload();
-    return { success: cancelled };
+  ipcMain.handle(AppUpdateIpc.CheckNow, async (_event, options?: { manual?: boolean }) => {
+    return getAppUpdateCoordinator().checkNow(options);
   });
 
-  ipcMain.handle('appUpdate:install', async (_event, filePath: string) => {
-    try {
-      await installUpdate(filePath);
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Installation failed' };
-    }
+  ipcMain.handle(AppUpdateIpc.RetryDownload, async () => {
+    const state = await getAppUpdateCoordinator().retryDownload();
+    return { success: true, state };
+  });
+
+  ipcMain.handle(AppUpdateIpc.CancelDownload, async () => {
+    const state = getAppUpdateCoordinator().cancelDownload();
+    return { success: true, state };
+  });
+
+  ipcMain.handle(AppUpdateIpc.InstallReady, async () => {
+    return getAppUpdateCoordinator().installReadyUpdate();
   });
 
   // Helper: detect if a URL belongs to GitHub Copilot and apply token refresh on 401.
@@ -4293,7 +4885,7 @@ if (!gotTheLock) {
     headers: Record<string, string>;
     body?: string;
   }) => {
-    console.log(`[api:fetch] ${options.method} ${options.url}, headers: ${JSON.stringify(options.headers)}, body: ${options.body}`);
+    console.log(`[api:fetch] ${options.method} ${options.url}, headers: ${serializeForLog(options.headers)}, body: ${options.body}`);
 
     const doFetch = async (headers: Record<string, string>) => {
       const response = await session.defaultSession.fetch(options.url, {
@@ -4786,6 +5378,8 @@ if (!gotTheLock) {
       // CronJobService may not have been initialized — safe to ignore.
     }
 
+    sqliteBackupManager?.stopPeriodicBackupLoop();
+
     // Close the SQLite database to flush the WAL and release the file lock.
     try {
       getStore().close();
@@ -4839,8 +5433,12 @@ if (!gotTheLock) {
 
   // 初始化应用
   const initApp = async () => {
+    const profiler = new StartupProfiler();
+
+    profiler.mark('app.whenReady');
     console.log('[Main] initApp: waiting for app.whenReady()');
     await app.whenReady();
+    profiler.measure('app.whenReady');
     console.log('[Main] initApp: app is ready');
 
     // Note: Calendar permission is checked on-demand when calendar operations are requested
@@ -4861,9 +5459,28 @@ if (!gotTheLock) {
       return net.fetch(`file://${filePath}`);
     });
 
+    profiler.mark('initStore');
     console.log('[Main] initApp: starting initStore()');
     store = await initStore();
+    profiler.measure('initStore');
     console.log('[Main] initApp: store initialized');
+    refreshEndpointsTestMode(store);
+    sqliteBackupManager = new SqliteBackupManager(app.getPath('userData'));
+
+    const startSqliteBackupLoop = async (): Promise<void> => {
+      if (!sqliteBackupManager) return;
+      await sqliteBackupManager.startPeriodicBackupLoop(() => getStore().getDatabase());
+    };
+
+    const stopSqliteBackupLoop = (): void => {
+      sqliteBackupManager?.stopPeriodicBackupLoop();
+    };
+
+    if (getSqliteAutoBackupEnabledFromConfig(getStore().get<AppConfigSettings>('app_config'))) {
+      await startSqliteBackupLoop().catch((error) => {
+        console.error('[SqliteBackup] Failed to start periodic backup loop:', error);
+      });
+    }
 
     // Defensive recovery: app may be force-closed during execution and leave
     // stale running flags in DB. Normalize them on startup.
@@ -4874,6 +5491,66 @@ if (!gotTheLock) {
     }
     // Inject store getter into claudeSettings
     setStoreGetter(() => store);
+    // Inject auth getters for lobsterai-server provider routing
+    // The getter proactively triggers a background token refresh when the
+    // accessToken is within 5 minutes of expiry, so that the SDK always
+    // gets a fresh token without blocking.
+    //
+    // refreshOnce() is the single entry-point for all token refresh paths
+    // (proactive, proxy 401/403 retry). It deduplicates concurrent calls via
+    // pendingTokenRefresh so that rolling refresh tokens are never consumed twice.
+    const refreshOnce = async (reason: string): Promise<string | null> => {
+      if (pendingTokenRefresh) {
+        return pendingTokenRefresh;
+      }
+      let resolvedToken: string | null = null;
+      pendingTokenRefresh = (async () => {
+        try {
+          const tokens = getAuthTokens();
+          if (!tokens?.refreshToken) return null;
+          const serverBaseUrl = getServerApiBaseUrl();
+          const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+          });
+          if (resp.ok) {
+            const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
+            if (body.code === 0 && body.data) {
+              saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
+              console.log(`[Auth] token refresh succeeded (reason: ${reason})`);
+              resolvedToken = body.data.accessToken;
+              // Token proxy handles fresh tokens dynamically — no need
+              // to restart the gateway on token refresh.
+              syncOpenClawConfig({ reason: `token-refresh:${reason}`, restartGatewayIfRunning: false }).catch((err) => {
+                console.warn('[Auth] post-refresh OpenClaw config sync failed:', err);
+              });
+            }
+          }
+        } catch (err) {
+          console.warn(`[Auth] token refresh failed (reason: ${reason}):`, err);
+        } finally {
+          pendingTokenRefresh = null;
+        }
+        return resolvedToken;
+      })();
+      return pendingTokenRefresh;
+    };
+
+    setAuthTokensGetter(() => {
+      const tokens = getAuthTokens();
+      if (!tokens) return null;
+      // Check if accessToken is close to expiry and trigger background refresh
+      try {
+        const payload = JSON.parse(Buffer.from(tokens.accessToken.split('.')[1], 'base64').toString());
+        const expiresAt = payload.exp * 1000;
+        if (expiresAt - Date.now() < 5 * 60 * 1000) {
+          void refreshOnce('proactive'); // fire-and-forget
+        }
+      } catch { /* unable to parse JWT, return token as-is */ }
+      return tokens;
+    });
+    setServerBaseUrlGetter(() => getServerApiBaseUrl());
 
     // Initialize Copilot token manager and restore token state if available
     initCopilotTokenManager(getStore);
@@ -4889,6 +5566,30 @@ if (!gotTheLock) {
       });
     }
 
+    registerProxyTokenRefresher('lobsterai-server', async () => {
+      const tokens = getAuthTokens();
+      if (!tokens?.refreshToken) return null;
+      const serverBaseUrl = getServerApiBaseUrl();
+      try {
+        const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+        });
+        if (resp.ok) {
+          const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
+          if (body.code === 0 && body.data) {
+            saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
+            console.log('[Auth] proxy token refresh succeeded');
+            return body.data.accessToken;
+          }
+        }
+      } catch (err) {
+        console.warn('[Auth] proxy token refresh failed:', err);
+      }
+      return null;
+    });
+
     registerProxyTokenRefresher('github-copilot', async () => {
       try {
         const { refreshCopilotTokenNow } = await import('./libs/copilotTokenManager');
@@ -4900,7 +5601,23 @@ if (!gotTheLock) {
       }
     });
 
+    // Start the lightweight token proxy before OpenClaw config sync so that
+    // lobsterai-server provider can use the proxy URL in its config.
+    profiler.mark('openClawTokenProxy');
+    try {
+      await startOpenClawTokenProxy({
+        getAuthTokens,
+        refreshToken: refreshOnce,
+        getServerBaseUrl: getServerApiBaseUrl,
+      });
+      console.log('[Main] OpenClaw token proxy started');
+    } catch (err) {
+      console.warn('[Main] OpenClaw token proxy failed to start (non-fatal):', err);
+    }
+    profiler.measure('openClawTokenProxy');
+
     // Enterprise config sync — must run before openclawConfigSync
+    profiler.mark('enterpriseConfigSync');
     // so enterprise data is in SQLite when the config is generated.
     const enterpriseConfigPath = resolveEnterpriseConfigPath();
     if (enterpriseConfigPath) {
@@ -4947,6 +5664,36 @@ if (!gotTheLock) {
             const cs = getCoworkStore();
             return cs.getConfig().workingDirectory;
           },
+          (agent) => {
+            const cs = getCoworkStore();
+            const existing = cs.getAgent(agent.id);
+            const updates = {
+              name: agent.name,
+              description: agent.description,
+              systemPrompt: agent.systemPrompt,
+              identity: agent.identity,
+              model: agent.model,
+              icon: agent.icon,
+              skillIds: agent.skillIds,
+              enabled: agent.enabled,
+            };
+            if (existing) {
+              cs.updateAgent(agent.id, updates);
+            } else {
+              cs.createAgent({
+                id: agent.id,
+                name: agent.name,
+                description: agent.description,
+                systemPrompt: agent.systemPrompt,
+                identity: agent.identity,
+                model: agent.model,
+                icon: agent.icon,
+                skillIds: agent.skillIds,
+                source: 'custom',
+              });
+              cs.updateAgent(agent.id, { enabled: agent.enabled });
+            }
+          },
         );
       } catch (error) {
         console.error('[Enterprise] config sync failed:', error);
@@ -4963,6 +5710,7 @@ if (!gotTheLock) {
         console.log('[Enterprise] config package removed, cleared enterprise mode and reset executionMode');
       }
     }
+    profiler.measure('enterpriseConfigSync');
 
     bindCoworkRuntimeForwarder();
     bindOpenClawStatusForwarder();
@@ -4976,6 +5724,34 @@ if (!gotTheLock) {
       );
     }
 
+    // One-time migration: move main agent workspace files from the user's
+    // working directory to the fixed {STATE_DIR}/workspace-main/ path.
+    try {
+      const engineManager = getOpenClawEngineManager();
+      migrateMainAgentWorkspace(
+        engineManager.getStateDir(),
+        getCoworkStore().getConfig().workingDirectory,
+        getStore(),
+      );
+    } catch (err) {
+      console.warn('[OpenClaw] main agent workspace migration failed (non-fatal):', err);
+    }
+
+    // Start proxy BEFORE config sync so proxy-dependent providers (e.g. copilot)
+    // get the correct baseURL on the first write, avoiding a mid-startup config
+    // overwrite that triggers unnecessary gateway hot-reload.
+    profiler.mark('applyProxyPreference');
+    const appConfig = getStore().get<AppConfigSettings>('app_config');
+    await applyProxyPreference(getUseSystemProxyFromConfig(appConfig));
+    profiler.measure('applyProxyPreference');
+
+    profiler.mark('coworkOpenAICompatProxy');
+    await startCoworkOpenAICompatProxy().catch((error) => {
+      console.error('Failed to start OpenAI compatibility proxy:', error);
+    });
+    profiler.measure('coworkOpenAICompatProxy');
+
+    profiler.mark('syncOpenClawConfig');
     const startupSync = await syncOpenClawConfig({
       reason: 'startup',
       restartGatewayIfRunning: false,
@@ -4983,20 +5759,33 @@ if (!gotTheLock) {
     if (!startupSync.success) {
       console.error('[OpenClaw] Startup config sync failed:', startupSync.error);
     }
-    if (resolveCoworkAgentEngine() === 'openclaw') {
-      void ensureOpenClawRunningForCowork().then(() => {
-        // Start cron polling once the gateway is confirmed running.
-        try {
-          getCronJobService().startPolling();
-        } catch (err) {
-          console.warn('[Main] CronJobService not available after OpenClaw startup:', err);
-        }
-      }).catch((error) => {
-        console.error('[OpenClaw] Failed to auto-start gateway on app startup:', error);
-      });
-    }
+    profiler.measure('syncOpenClawConfig');
+    void ensureOpenClawRunningForCowork().then(() => {
+      // Start cron polling once the gateway is confirmed running.
+      try {
+        getCronJobService().startPolling();
+      } catch (err) {
+        console.warn('[Main] CronJobService not available after OpenClaw startup:', err);
+      }
+    }).catch((error) => {
+      console.error('[OpenClaw] Failed to auto-start gateway on app startup:', error);
+    });
 
-    console.log('[Main] initApp: setStoreGetter done');
+    // ── Step 1: Show window ASAP ──────────────────────────────────────
+    // CSP + createWindow moved before skill initialisation so the user
+    // sees the loading UI within ~1-2 s instead of waiting for the full
+    // skill bootstrap (~6-8 s previously).
+    setContentSecurityPolicy();
+
+    profiler.mark('createWindow');
+    console.log('[Main] initApp: creating window');
+    createWindow();
+    profiler.measure('createWindow');
+    console.log('[Main] initApp: window created');
+
+    // ── Step 2-4: Skill bootstrap (non-blocking) ────────────────────
+    console.log('[Main] initApp: starting skill bootstrap');
+    profiler.mark('skillManager');
     const manager = getSkillManager();
     console.log('[Main] initApp: getSkillManager done');
 
@@ -5008,75 +5797,68 @@ if (!gotTheLock) {
       });
     });
 
-    // Non-critical: sync bundled skills to user data.
-    // Wrapped in try-catch so a failure here does not block window creation.
-    try {
-      manager.syncBundledSkillsToUserData();
-      console.log('[Main] initApp: syncBundledSkillsToUserData done');
-    } catch (error) {
-      console.error('[Main] initApp: syncBundledSkillsToUserData failed:', error);
-    }
+    // Parallelise independent skill sub-tasks (Step 4).
+    await Promise.all([
+      // Group A: file-system skill operations (sync, must run in order)
+      (async () => {
+        profiler.mark('syncBundledSkills');
+        try {
+          manager.syncBundledSkillsToUserData();
+          console.log('[Main] initApp: syncBundledSkillsToUserData done');
+        } catch (error) {
+          console.error('[Main] initApp: syncBundledSkillsToUserData failed:', error);
+        }
+        profiler.measure('syncBundledSkills');
 
-    try {
-      manager.recoverInterruptedUpgrades();
-      console.log('[Main] initApp: recoverInterruptedUpgrades done');
-    } catch (error) {
-      console.error('[Main] initApp: recoverInterruptedUpgrades failed:', error);
-    }
+        try {
+          manager.recoverInterruptedUpgrades();
+          console.log('[Main] initApp: recoverInterruptedUpgrades done');
+        } catch (error) {
+          console.error('[Main] initApp: recoverInterruptedUpgrades failed:', error);
+        }
 
-    try {
-      const runtimeResult = await ensurePythonRuntimeReady();
-      if (!runtimeResult.success) {
-        console.error('[Main] initApp: ensurePythonRuntimeReady failed:', runtimeResult.error);
-      } else {
-        console.log('[Main] initApp: ensurePythonRuntimeReady done');
-      }
-    } catch (error) {
-      console.error('[Main] initApp: ensurePythonRuntimeReady threw:', error);
-    }
+        try {
+          manager.startWatching();
+          console.log('[Main] initApp: startWatching done');
+        } catch (error) {
+          console.error('[Main] initApp: startWatching failed:', error);
+        }
+      })(),
 
-    try {
-      manager.startWatching();
-      console.log('[Main] initApp: startWatching done');
-    } catch (error) {
-      console.error('[Main] initApp: startWatching failed:', error);
-    }
+      // Group B: python runtime (independent, async)
+      (async () => {
+        profiler.mark('pythonRuntime');
+        try {
+          const runtimeResult = await ensurePythonRuntimeReady();
+          if (!runtimeResult.success) {
+            console.error('[Main] initApp: ensurePythonRuntimeReady failed:', runtimeResult.error);
+          } else {
+            console.log('[Main] initApp: ensurePythonRuntimeReady done');
+          }
+        } catch (error) {
+          console.error('[Main] initApp: ensurePythonRuntimeReady threw:', error);
+        }
+        profiler.measure('pythonRuntime');
+      })(),
+    ]);
 
-    // Start skill services (non-critical)
+    // Skill services (web-search bridge) — fire-and-forget (Step 2).
+    // No IPC handler or downstream init depends on this completing.
     try {
       const skillServices = getSkillServiceManager();
       console.log('[Main] initApp: getSkillServiceManager done');
-      await skillServices.startAll();
-      console.log('[Main] initApp: skill services started');
-    } catch (error) {
-      console.error('[Main] initApp: skill services failed:', error);
-    }
-
-    const appConfig = getStore().get<AppConfigSettings>('app_config');
-    await applyProxyPreference(getUseSystemProxyFromConfig(appConfig));
-
-    await startCoworkOpenAICompatProxy().catch((error) => {
-      console.error('Failed to start OpenAI compatibility proxy:', error);
-    });
-
-    // Re-sync OpenClaw config after proxy is ready so that providers that route
-    // through the proxy (e.g. github-copilot) get the correct baseUrl.
-    if (resolveCoworkAgentEngine() === 'openclaw') {
-      const proxyResync = await syncOpenClawConfig({
-        reason: 'proxy-ready',
+      const t0 = performance.now();
+      void skillServices.startAll().then(() => {
+        console.log(`[Main] initApp: skill services started (background, ${(performance.now() - t0).toFixed(0)}ms)`);
+      }).catch((error) => {
+        console.error('[Main] initApp: skill services failed:', error);
       });
-      if (proxyResync.changed) {
-        console.log('[Main] OpenClaw config updated after proxy ready, gateway will restart to pick up new config');
-      }
+    } catch (error) {
+      console.error('[Main] initApp: skill services init failed:', error);
     }
+    profiler.measure('skillManager');
 
-    // 设置安全策略
-    setContentSecurityPolicy();
-
-    // 创建窗口
-    console.log('[Main] initApp: creating window');
-    createWindow();
-    console.log('[Main] initApp: window created');
+    console.log(profiler.summary());
 
     // Windows/Linux cold start: parse deep link from process.argv
     // Always buffer since renderer is not ready yet after createWindow()
@@ -5126,6 +5908,9 @@ if (!gotTheLock) {
 
     let lastLanguage = getStore().get<AppConfigSettings>('app_config')?.language;
     let lastUseSystemProxy = getUseSystemProxyFromConfig(getStore().get<AppConfigSettings>('app_config'));
+    let lastSqliteAutoBackupEnabled = getSqliteAutoBackupEnabledFromConfig(
+      getStore().get<AppConfigSettings>('app_config'),
+    );
     getStore().onDidChange<AppConfigSettings>('app_config', (newConfig, oldConfig) => {
       updateTitleBarOverlay();
       // 仅在语言变更时刷新托盘菜单文本
@@ -5141,13 +5926,35 @@ if (!gotTheLock) {
         : lastUseSystemProxy;
       const currentUseSystemProxy = getUseSystemProxyFromConfig(newConfig);
       if (currentUseSystemProxy !== previousUseSystemProxy) {
+        console.log(`${gwDiagTs()} proxy setting changed: ${previousUseSystemProxy} -> ${currentUseSystemProxy}, will restart gateway if running`);
         void applyProxyPreference(currentUseSystemProxy).then(() => {
           if (getOpenClawEngineManager().getStatus().phase === 'running') {
-            void getOpenClawEngineManager().restartGateway();
+            void syncOpenClawConfig({
+              reason: 'system-proxy-changed',
+              restartGatewayIfRunning: false,
+            }).finally(() => {
+              console.log(`${gwDiagTs()} restarting gateway after proxy change`);
+              void getOpenClawEngineManager().restartGateway('proxy-change');
+            });
           }
         });
       }
       lastUseSystemProxy = currentUseSystemProxy;
+
+      const previousSqliteAutoBackupEnabled = oldConfig
+        ? getSqliteAutoBackupEnabledFromConfig(oldConfig)
+        : lastSqliteAutoBackupEnabled;
+      const currentSqliteAutoBackupEnabled = getSqliteAutoBackupEnabledFromConfig(newConfig);
+      if (currentSqliteAutoBackupEnabled !== previousSqliteAutoBackupEnabled) {
+        if (currentSqliteAutoBackupEnabled) {
+          void startSqliteBackupLoop().catch((error) => {
+            console.error('[SqliteBackup] Failed to enable periodic backup loop:', error);
+          });
+        } else {
+          stopSqliteBackupLoop();
+        }
+      }
+      lastSqliteAutoBackupEnabled = currentSqliteAutoBackupEnabled;
     });
 
     // 在 macOS 上，当点击 dock 图标时显示已有窗口或重新创建

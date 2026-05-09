@@ -38,12 +38,22 @@ export function setStoreGetter(getter: () => SqliteStore | null): void {
   storeGetter = getter;
 }
 
+export function setAuthTokensGetter(_getter: () => { accessToken: string; refreshToken: string } | null): void {
+  // Server authentication is disabled in the MetroAI fork.
+}
+
+export function setServerBaseUrlGetter(_getter: () => string): void {
+  // Server authentication is disabled in the MetroAI fork.
+}
+
 // Cached server model metadata (populated when auth:getModels is called)
 // Keyed by modelId → { supportsImage }
 let serverModelMetadataCache: Map<string, { supportsImage?: boolean }> = new Map();
 
-export function updateServerModelMetadata(models: Array<{ modelId: string; supportsImage?: boolean }>): void {
+export function updateServerModelMetadata(models: Array<{ modelId: string; supportsImage?: boolean }>): boolean {
+  const previous = JSON.stringify(getAllServerModelMetadata());
   serverModelMetadataCache = new Map(models.map(m => [m.modelId, { supportsImage: m.supportsImage }]));
+  return previous !== JSON.stringify(getAllServerModelMetadata());
 }
 
 export function clearServerModelMetadata(): void {
@@ -85,7 +95,7 @@ function getEffectiveProviderApiFormat(providerName: string, apiFormat: unknown)
 }
 
 function providerRequiresApiKey(providerName: string): boolean {
-  return providerName !== ProviderName.Ollama;
+  return providerName !== ProviderName.Ollama && providerName !== ProviderName.LmStudio;
 }
 
 function resolveMatchedProvider(appConfig: AppConfig): { matched: MatchedProvider | null; error?: string } {

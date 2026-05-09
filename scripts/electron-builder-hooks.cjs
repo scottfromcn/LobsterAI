@@ -105,7 +105,9 @@ function verifyPreinstalledPlugins(runtimeRoot, buildHint) {
   const extensionsDir = path.join(runtimeRoot, 'third-party-extensions');
   const missing = [];
 
-  for (const plugin of plugins) {
+  const requiredPlugins = plugins.filter((plugin) => !plugin.optional);
+
+  for (const plugin of requiredPlugins) {
     if (!plugin.id) continue;
     const pluginDir = path.join(extensionsDir, plugin.id);
     if (!existsSync(pluginDir)) {
@@ -121,7 +123,7 @@ function verifyPreinstalledPlugins(runtimeRoot, buildHint) {
     );
   }
 
-  console.log(`[electron-builder-hooks] Verified ${plugins.length} preinstalled OpenClaw plugin(s).`);
+  console.log(`[electron-builder-hooks] Verified ${requiredPlugins.length} required preinstalled OpenClaw plugin(s).`);
 }
 
 function hasCompiledLocalExtension(runtimeRoot, extensionId) {
