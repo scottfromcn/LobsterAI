@@ -6040,8 +6040,9 @@ if (!gotTheLock) {
         const parsed = new URL(coldStartDeepLink);
         if (parsed.hostname === 'auth' && parsed.pathname === '/callback') {
           const code = parsed.searchParams.get('code');
+          const state = parsed.searchParams.get('state') ?? undefined;
           if (code) {
-            pendingAuthCode = code;
+            pendingAuthCallback = { code, state };
           }
         }
       } catch (e) {

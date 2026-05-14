@@ -18,3 +18,8 @@
 - Added custom OIDC login with PKCE and blocked app usage before authentication.
 - Locked model settings to a single company OpenAI-compatible provider with default model `glm-4.7`.
 - Disabled manual MCP server creation and manual Skill imports, leaving marketplace installation as the supported path.
+
+## 2026-05-15
+
+- Built the macOS arm64 package at `release/MetroAI-2026.5.7-arm64.dmg`.
+- Fixed cold-start OIDC callback buffering so packaged Electron compilation succeeds.

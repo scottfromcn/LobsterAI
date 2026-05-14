@@ -26,3 +26,11 @@
 - Marketplace policy: hid manual MCP and Skill add/import entry points; main process rejects manual MCP creation and non-marketplace Skill downloads/upgrades.
 - Validation: `npm run build` completed successfully after the changes. Targeted lint for touched files passed.
 - Note: full `npm run lint` is still blocked by pre-existing import-sort and warning debt across unrelated files.
+
+## 2026-05-15
+
+- Node: packaging a macOS arm64 build after the enterprise policy changes.
+- Status: built `release/MetroAI-2026.5.7-arm64.dmg` and `release/MetroAI-2026.5.7-arm64.dmg.blockmap`.
+- Build fix: updated cold-start deep link buffering to preserve OIDC `state` and avoid the stale `pendingAuthCode` reference during Electron compilation.
+- Validation: `npm run dist:mac` completed successfully with the configured proxy. Direct `npm run compile:electron` passed before retrying the full package.
+- Packaging note: app signing and notarization were skipped because no local Apple Developer signing identity or notarization credentials were configured.
