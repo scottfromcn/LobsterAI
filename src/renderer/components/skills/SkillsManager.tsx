@@ -9,6 +9,7 @@ import { createPortal } from 'react-dom';
 import { useDispatch, useSelector } from 'react-redux';
 
 import type { SkillSecurityReport as SkillSecurityReportData } from '../../../main/libs/skillSecurity/skillSecurityTypes';
+import { EnterpriseFeaturePolicy } from '../../../shared/enterprisePolicy';
 import { i18nService } from '../../services/i18n';
 import { compareVersions,resolveLocalizedText, skillService } from '../../services/skill';
 import { RootState } from '../../store';
@@ -32,6 +33,7 @@ type ImportSourceType = 'github' | 'clawhub';
 type DirectImportSource = 'zip' | 'folder' | 'remote';
 
 const importSourceTypes: ImportSourceType[] = ['github', 'clawhub'];
+const allowManualSkillSources = EnterpriseFeaturePolicy.AllowManualSkillSources;
 
 const importTabConfig: Record<ImportSourceType, {
   tabLabelKey: string;
@@ -578,6 +580,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
             </button>
           )}
         </div>
+        {allowManualSkillSources && (
         <div className="relative">
           <button
             ref={addSkillButtonRef}
@@ -634,6 +637,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ readOnly, onCreateByChat 
             </div>
           )}
         </div>
+        )}
         </div>
 
         {/* Tabs */}

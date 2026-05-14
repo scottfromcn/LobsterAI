@@ -1,5 +1,6 @@
 import { type ApiFormat,type ProviderConfig,ProviderRegistry } from '@shared/providers';
 
+import { EnterpriseProvider } from '../../shared/enterprisePolicy';
 import { AppConfig, CONFIG_KEYS, defaultConfig, isCustomProvider } from '../config';
 import { localStore } from './store';
 
@@ -43,6 +44,9 @@ const normalizeProviderBaseUrl = (providerKey: string, baseUrl: unknown): string
 };
 
 const normalizeProviderApiFormat = (providerKey: string, apiFormat: unknown): 'anthropic' | 'openai' | 'gemini' => {
+  if (providerKey === EnterpriseProvider.Key) {
+    return EnterpriseProvider.ApiFormat;
+  }
   const fixed = getFixedProviderApiFormat(providerKey);
   if (fixed) {
     return fixed;
@@ -81,6 +85,43 @@ const normalizeProvidersConfig = (providers: AppConfig['providers']): AppConfig[
       },
     ])
   ) as AppConfig['providers'];
+};
+
+const buildEnterpriseProviderConfig = (
+  providerConfig?: ProviderConfig,
+): ProviderConfig => ({
+  enabled: true,
+  apiKey: providerConfig?.apiKey ?? '',
+  baseUrl: EnterpriseProvider.BaseUrl,
+  apiFormat: EnterpriseProvider.ApiFormat,
+  displayName: EnterpriseProvider.DisplayName,
+  models: [{
+    id: EnterpriseProvider.DefaultModelId,
+    name: EnterpriseProvider.DefaultModelName,
+    supportsImage: false,
+  }],
+});
+
+const normalizeEnterpriseConfig = (config: AppConfig): AppConfig => {
+  const enterpriseProvider = buildEnterpriseProviderConfig(config.providers?.[EnterpriseProvider.Key]);
+  return {
+    ...config,
+    api: {
+      key: enterpriseProvider.apiKey,
+      baseUrl: EnterpriseProvider.BaseUrl,
+    },
+    model: {
+      ...config.model,
+      availableModels: enterpriseProvider.models ?? [],
+      defaultModel: EnterpriseProvider.DefaultModelId,
+      defaultModelProvider: EnterpriseProvider.Key,
+    },
+    providers: {
+      ...(defaultConfig.providers ?? {}),
+      ...(config.providers ?? {}),
+      [EnterpriseProvider.Key]: enterpriseProvider,
+    },
+  };
 };
 
 /**
@@ -216,7 +257,7 @@ class ConfigService {
           );
         }
 
-        this.config = migrateCustomProviders({
+        this.config = normalizeEnterpriseConfig(migrateCustomProviders({
           ...defaultConfig,
           ...storedConfig,
           api: {
@@ -233,7 +274,9 @@ class ConfigService {
             ...(storedConfig.shortcuts ?? {}),
           } as AppConfig['shortcuts'],
           providers: mergedProviders as AppConfig['providers'],
-        });
+        }));
+      } else {
+        this.config = normalizeEnterpriseConfig(defaultConfig);
       }
     } catch (error) {
       console.error('[ConfigService] init failed:', error);
@@ -253,11 +296,11 @@ class ConfigService {
     const stored = await localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG);
     const base = stored ?? this.config;
 
-    this.config = {
+    this.config = normalizeEnterpriseConfig({
       ...base,
       ...newConfig,
       ...(normalizedProviders ? { providers: normalizedProviders } : {}),
-    };
+    });
     await localStore.setItem(CONFIG_KEYS.APP_CONFIG, this.config);
     window.dispatchEvent(new CustomEvent('config-updated'));
   }

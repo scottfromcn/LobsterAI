@@ -1,5 +1,7 @@
 import { type ProviderConfig,ProviderRegistry } from '@shared/providers';
 
+import { EnterpriseProvider } from '../shared/enterprisePolicy';
+
 // 配置类型定义
 export interface AppConfig {
   // API 配置
@@ -59,6 +61,19 @@ const buildDefaultProviders = (): AppConfig['providers'] => {
     };
   }
 
+  providers[EnterpriseProvider.Key] = {
+    enabled: true,
+    apiKey: '',
+    baseUrl: EnterpriseProvider.BaseUrl,
+    apiFormat: EnterpriseProvider.ApiFormat,
+    displayName: EnterpriseProvider.DisplayName,
+    models: [{
+      id: EnterpriseProvider.DefaultModelId,
+      name: EnterpriseProvider.DefaultModelName,
+      supportsImage: false,
+    }],
+  };
+
   return providers;
 };
 
@@ -66,14 +81,14 @@ const buildDefaultProviders = (): AppConfig['providers'] => {
 export const defaultConfig: AppConfig = {
   api: {
     key: '',
-    baseUrl: 'https://api.deepseek.com/anthropic',
+    baseUrl: EnterpriseProvider.BaseUrl,
   },
   model: {
     availableModels: [
-      { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false },
+      { id: EnterpriseProvider.DefaultModelId, name: EnterpriseProvider.DefaultModelName, supportsImage: false },
     ],
-    defaultModel: 'deepseek-reasoner',
-    defaultModelProvider: 'deepseek',
+    defaultModel: EnterpriseProvider.DefaultModelId,
+    defaultModelProvider: EnterpriseProvider.Key,
   },
   providers: buildDefaultProviders(),
   theme: 'system',
@@ -109,10 +124,8 @@ export const CHINA_PROVIDERS = [...ProviderRegistry.idsByRegion('china')] as con
 export const GLOBAL_PROVIDERS = ProviderRegistry.idsByRegion('global');
 
 export const getVisibleProviders = (language: 'zh' | 'en'): readonly string[] => {
-  if (language === 'zh') {
-    return [...CHINA_PROVIDERS];
-  }
-  return ProviderRegistry.idsForEnLocale();
+  void language;
+  return [EnterpriseProvider.Key];
 };
 
 /**

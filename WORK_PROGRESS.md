@@ -17,3 +17,12 @@
 - Build fixes: added an OpenClaw patch for pnpm native binary runner handling and made the electron-builder plugin check ignore optional OpenClaw plugins.
 - Validation: `npm run build`, `npm run compile:electron`, `npm run build:skills`, `npm run openclaw:runtime:mac-arm64`, and direct `electron-builder --mac --config electron-builder.json` completed successfully.
 - Packaging note: app signing and notarization were skipped because no local Apple Developer signing identity or notarization credentials were configured.
+
+## 2026-05-14
+
+- Node: applying enterprise access controls for OIDC auth, fixed model provider policy, and marketplace-only MCP/Skill installation.
+- Status: implemented login-first renderer gate and main-process Cowork session guard using the custom OIDC authorization code flow.
+- Provider policy: locked model management to a single OpenAI-compatible company provider at `http://127.0.0.1:3000/v1`; only the API key remains editable and the default model is `glm-4.7`.
+- Marketplace policy: hid manual MCP and Skill add/import entry points; main process rejects manual MCP creation and non-marketplace Skill downloads/upgrades.
+- Validation: `npm run build` completed successfully after the changes. Targeted lint for touched files passed.
+- Note: full `npm run lint` is still blocked by pre-existing import-sort and warning debt across unrelated files.

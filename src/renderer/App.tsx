@@ -90,6 +90,8 @@ const App: React.FC = () => {
   const currentSessionId = useSelector(selectCurrentSessionId);
   const pendingPermission = useSelector(selectFirstPendingPermission);
   const authUser = useSelector((state: RootState) => state.auth.user);
+  const authIsLoggedIn = useSelector((state: RootState) => state.auth.isLoggedIn);
+  const authIsLoading = useSelector((state: RootState) => state.auth.isLoading);
   const isWindows = window.electron.platform === 'win32';
 
   const waitWithTimeout = useCallback(
@@ -394,8 +396,16 @@ const App: React.FC = () => {
     };
   }, [showToast]);
 
-  const handleShowLogin = useCallback(() => {
-    showToast(i18nService.t('featureInDevelopment'));
+  const handleShowLogin = useCallback(async () => {
+    try {
+      const result = await authService.login();
+      if (result?.success === false) {
+        showToast(result.error || i18nService.t('loginNotAvailable'));
+      }
+    } catch (error) {
+      console.error('[App] login failed:', error);
+      showToast(i18nService.t('loginNotAvailable'));
+    }
   }, [showToast]);
 
   const runUpdateCheck = useCallback(async () => {
@@ -545,6 +555,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.repeat || isShortcutInputActive()) return;
+      if (!authIsLoggedIn) return;
 
       const { shortcuts } = configService.getConfig();
       const activeShortcuts = {
@@ -572,7 +583,7 @@ const App: React.FC = () => {
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [handleShowSettings, handleNewChat]);
+  }, [authIsLoggedIn, handleShowSettings, handleNewChat]);
 
   useEffect(() => {
     return () => {
@@ -595,18 +606,20 @@ const App: React.FC = () => {
   // 监听托盘菜单打开设置的 IPC 事件
   useEffect(() => {
     const unsubscribe = window.electron.ipcRenderer.on('app:openSettings', () => {
+      if (!authIsLoggedIn) return;
       handleShowSettings();
     });
     return unsubscribe;
-  }, [handleShowSettings]);
+  }, [authIsLoggedIn, handleShowSettings]);
 
   // 监听托盘菜单新建任务的 IPC 事件
   useEffect(() => {
     const unsubscribe = window.electron.ipcRenderer.on('app:newTask', () => {
+      if (!authIsLoggedIn) return;
       handleNewChat();
     });
     return unsubscribe;
-  }, [handleNewChat]);
+  }, [authIsLoggedIn, handleNewChat]);
 
   useEffect(() => {
     if (!isInitialized) return;
@@ -741,6 +754,36 @@ const App: React.FC = () => {
               enterpriseConfig={enterpriseConfig}
             />
           )}
+        </div>
+      </div>
+    );
+  }
+
+  if (authIsLoading || !authIsLoggedIn) {
+    return (
+      <div className="h-screen overflow-hidden flex flex-col bg-background">
+        {toastMessage && (
+          <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
+        )}
+        {windowsStandaloneTitleBar}
+        <div className="flex-1 flex items-center justify-center px-6">
+          <div className="w-full max-w-sm flex flex-col items-center text-center gap-5">
+            <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center shadow-glow-accent">
+              <ChatBubbleLeftRightIcon className="h-8 w-8 text-white" />
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-2xl font-semibold text-foreground">{i18nService.t('authLoginToChat')}</h1>
+              <p className="text-sm text-muted-foreground">{i18nService.t('authLoginRequired')}</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleShowLogin}
+              disabled={authIsLoading}
+              className="h-10 px-5 rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+            >
+              {authIsLoading ? i18nService.t('loading') : i18nService.t('authLoginRequiredBtn')}
+            </button>
+          </div>
         </div>
       </div>
     );

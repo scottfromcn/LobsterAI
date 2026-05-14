@@ -4,6 +4,7 @@ import React, { useCallback,useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 
 import { type AppUpdateInfo,type AppUpdateRuntimeState,AppUpdateSource,AppUpdateStatus } from '../../shared/appUpdate/constants';
+import { EnterpriseFeaturePolicy, EnterpriseProvider } from '../../shared/enterprisePolicy';
 import { OpenClawProviderId, ProviderName, ProviderRegistry, resolveCodingPlanBaseUrl } from '../../shared/providers';
 import { type AppConfig, defaultConfig, getCustomProviderDefaultName, getProviderDisplayName, getVisibleProviders, isCustomProvider } from '../config';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
@@ -66,6 +67,8 @@ const providerKeys = [
   ...Object.values(ProviderName).filter(id => id !== ProviderName.Custom && id !== ProviderName.LobsteraiServer),
   ...CUSTOM_PROVIDER_KEYS,
 ] as const;
+
+const isEnterpriseProvider = (provider: string): boolean => provider === EnterpriseProvider.Key;
 
 type BuiltinProviderType = ProviderName;
 type CustomProviderType = (typeof CUSTOM_PROVIDER_KEYS)[number];
@@ -617,7 +620,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
   const minimaxIsOAuthMode = providers.minimax.authType !== 'apikey';
   // OpenAI defaults to API key mode unless the user explicitly opts in to OAuth
   const openaiIsOAuthMode = providers.openai.authType === 'oauth';
-  const isBaseUrlLocked = (activeProvider === 'zhipu' && providers.zhipu.codingPlanEnabled) || (activeProvider === 'qwen' && providers.qwen.codingPlanEnabled) || (activeProvider === 'volcengine' && providers.volcengine.codingPlanEnabled) || (activeProvider === 'moonshot' && providers.moonshot.codingPlanEnabled) || (activeProvider === 'qianfan' && providers.qianfan.codingPlanEnabled) || (activeProvider === 'xiaomi' && providers.xiaomi.codingPlanEnabled) || (activeProvider === 'minimax' && minimaxIsOAuthMode) || (activeProvider === 'openai' && openaiIsOAuthMode);
+  const isBaseUrlLocked = isEnterpriseProvider(activeProvider) || (activeProvider === 'zhipu' && providers.zhipu.codingPlanEnabled) || (activeProvider === 'qwen' && providers.qwen.codingPlanEnabled) || (activeProvider === 'volcengine' && providers.volcengine.codingPlanEnabled) || (activeProvider === 'moonshot' && providers.moonshot.codingPlanEnabled) || (activeProvider === 'qianfan' && providers.qianfan.codingPlanEnabled) || (activeProvider === 'xiaomi' && providers.xiaomi.codingPlanEnabled) || (activeProvider === 'minimax' && minimaxIsOAuthMode) || (activeProvider === 'openai' && openaiIsOAuthMode);
 
   // 创建引用来确保内容区域的滚动
   const contentRef = useRef<HTMLDivElement>(null);
@@ -1194,12 +1197,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
         filtered[key as keyof ProvidersConfig] = providers[key as keyof ProvidersConfig];
       }
     }
-    // Append custom_N providers that exist in state, sorted by numeric suffix
-    for (const key of CUSTOM_PROVIDER_KEYS) {
-      if (providers[key]) {
-        filtered[key] = providers[key];
-      }
-    }
     return filtered as ProvidersConfig;
   }, [language, providers]);
 
@@ -1243,6 +1240,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
 
   // Handle deleting a custom provider
   const handleDeleteCustomProvider = (key: ProviderType) => {
+    if (isEnterpriseProvider(key)) return;
     setPendingDeleteProvider(key);
   };
 
@@ -1286,6 +1284,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
   // Handle provider configuration change
   const handleProviderConfigChange = (provider: ProviderType, field: string, value: string) => {
     setProviders(prev => {
+      if (isEnterpriseProvider(provider) && field !== 'apiKey') {
+        return prev;
+      }
+
       if (field === 'apiFormat') {
         const nextApiFormat = getEffectiveApiFormat(provider, value);
         const nextProviderConfig: ProviderConfig = {
@@ -1863,6 +1865,24 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
     try {
       const normalizedProviders = Object.fromEntries(
         Object.entries(providers).map(([providerKey, providerConfig]) => {
+          if (isEnterpriseProvider(providerKey)) {
+            const hasValidAuth = hasProviderAuthConfigured(providerKey as ProviderType, providerConfig);
+            return [
+              providerKey,
+              {
+                ...providerConfig,
+                enabled: hasValidAuth,
+                baseUrl: EnterpriseProvider.BaseUrl,
+                apiFormat: EnterpriseProvider.ApiFormat,
+                displayName: EnterpriseProvider.DisplayName,
+                models: [{
+                  id: EnterpriseProvider.DefaultModelId,
+                  name: EnterpriseProvider.DefaultModelName,
+                  supportsImage: false,
+                }],
+              },
+            ];
+          }
           const apiFormat = getEffectiveApiFormat(providerKey, providerConfig.apiFormat);
           const hasValidAuth = hasProviderAuthConfigured(providerKey as ProviderType, providerConfig);
           return [
@@ -1878,13 +1898,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
       ) as ProvidersConfig;
 
       // Find the first enabled provider to use as the primary API
-      const firstEnabledProvider = Object.entries(normalizedProviders).find(
-        ([_, config]) => config.enabled
-      );
-
-      const primaryProvider = firstEnabledProvider
-        ? firstEnabledProvider[1]
-        : normalizedProviders[activeProvider];
+      const primaryProvider = normalizedProviders[EnterpriseProvider.Key] ?? normalizedProviders[activeProvider];
 
       await configService.updateConfig({
         api: {
@@ -3190,6 +3204,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                 <h3 className="text-sm font-medium text-foreground">
                   {i18nService.t('modelProviders')}
                 </h3>
+                {EnterpriseFeaturePolicy.AllowProviderManagement && (
                 <div className="flex items-center space-x-1">
                   <button
                     type="button"
@@ -3208,6 +3223,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                     {i18nService.t('export')}
                   </button>
                 </div>
+                )}
               </div>
               <input
                 ref={importInputRef}
@@ -3257,7 +3273,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                       </div>
                     </div>
                     <div className="flex items-center ml-2 gap-1">
-                      {isCustom && (
+                      {isCustom && !isEnterpriseProvider(provider) && (
                         <button
                           type="button"
                           className="opacity-0 group-hover:opacity-100 transition-opacity text-claude-secondaryText hover:text-red-500 dark:text-claude-darkSecondaryText dark:hover:text-red-400 p-0.5"
@@ -3272,6 +3288,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                           </svg>
                         </button>
                       )}
+                      {!isEnterpriseProvider(provider) && (
                       <div
                         title={!canToggleProvider ? i18nService.t('configureApiKey') : undefined}
                         className={`w-7 h-4 rounded-full flex items-center transition-colors ${
@@ -3293,12 +3310,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                           }`}
                         />
                       </div>
+                      )}
                     </div>
                   </div>
                 );
               })}
               {/* Add Custom Provider Button */}
-              {CUSTOM_PROVIDER_KEYS.some(k => !providers[k]) && (
+              {EnterpriseFeaturePolicy.AllowProviderManagement && CUSTOM_PROVIDER_KEYS.some(k => !providers[k]) && (
               <button
                 type="button"
                 onClick={handleAddCustomProvider}
@@ -3959,7 +3977,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                 </div>
               )}
 
-              {isCustomProvider(activeProvider) && (
+              {isCustomProvider(activeProvider) && !isEnterpriseProvider(activeProvider) && (
                 <div>
                   <label htmlFor={`${activeProvider}-displayName`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('customDisplayName')}
@@ -3975,7 +3993,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                 </div>
               )}
 
-              {!(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
+              {!isEnterpriseProvider(activeProvider) && !(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
               <div>
                 <label htmlFor={`${activeProvider}-baseUrl`} className="block text-xs font-medium text-foreground mb-1">
                   {i18nService.t('baseUrl')}
@@ -4085,7 +4103,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
               )}
 
               {/* API 格式选择器 */}
-              {shouldShowApiFormatSelector(activeProvider) && !(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
+              {!isEnterpriseProvider(activeProvider) && shouldShowApiFormatSelector(activeProvider) && !(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
                 <div>
                   <label htmlFor={`${activeProvider}-apiFormat`} className="block text-xs font-medium text-foreground mb-1">
                     {i18nService.t('apiFormat')}
@@ -4293,7 +4311,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
               )}
 
               {/* 测试连接按钮 */}
-              {!(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
+              {!isEnterpriseProvider(activeProvider) && !(activeProvider === 'minimax' && minimaxIsOAuthMode) && (
               <div className="flex items-center space-x-3">
                 <button
                   type="button"
@@ -4307,6 +4325,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
               </div>
               )}
 
+              {!isEnterpriseProvider(activeProvider) && (
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <h3 className="text-xs font-medium text-foreground">
@@ -4377,6 +4396,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, notice
                   )}
                 </div>
               </div>
+              )}
             </div>
           </div>
         );

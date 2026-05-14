@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { contextBridge, ipcRenderer } from 'electron';
 
 import { IpcChannel as ScheduledTaskIpc } from '../scheduledTask/constants';
@@ -531,8 +530,8 @@ contextBridge.exposeInMainWorld('electron', {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),
   },
   auth: {
-    login: (loginUrl?: string) => ipcRenderer.invoke('auth:login', { loginUrl }),
-    exchange: (code: string) => ipcRenderer.invoke('auth:exchange', { code }),
+    login: () => ipcRenderer.invoke('auth:login'),
+    exchange: (code: string, state?: string) => ipcRenderer.invoke('auth:exchange', { code, state }),
     getUser: () => ipcRenderer.invoke('auth:getUser'),
     getQuota: () => ipcRenderer.invoke('auth:getQuota'),
     logout: () => ipcRenderer.invoke('auth:logout'),
@@ -540,8 +539,8 @@ contextBridge.exposeInMainWorld('electron', {
     getAccessToken: () => ipcRenderer.invoke('auth:getAccessToken'),
     getModels: () => ipcRenderer.invoke('auth:getModels'),
     getProfileSummary: () => ipcRenderer.invoke('auth:getProfileSummary'),
-    onCallback: (callback: (data: { code: string }) => void) => {
-      const handler = (_event: any, data: { code: string }) => callback(data);
+    onCallback: (callback: (data: { code: string; state?: string }) => void) => {
+      const handler = (_event: any, data: { code: string; state?: string }) => callback(data);
       ipcRenderer.on('auth:callback', handler);
       return () => ipcRenderer.removeListener('auth:callback', handler);
     },

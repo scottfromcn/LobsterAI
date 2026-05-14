@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { OpenClawSessionPatch } from '../../common/openclawSession';
 import type { AppUpdateCheckResult, AppUpdateRuntimeState } from '../../shared/appUpdate/constants';
 interface ApiResponse {
@@ -569,8 +568,8 @@ interface IElectronAPI {
     requestCalendar: () => Promise<{ success: boolean; granted?: boolean; status?: string; error?: string }>;
   };
   auth: {
-    login: (loginUrl?: string) => Promise<{ success: boolean; error?: string }>;
-    exchange: (code: string) => Promise<{ success: boolean; user?: any; quota?: any; error?: string }>;
+    login: () => Promise<{ success: boolean; error?: string }>;
+    exchange: (code: string, state?: string) => Promise<{ success: boolean; user?: any; quota?: any; error?: string }>;
     getUser: () => Promise<{ success: boolean; user?: any; quota?: any }>;
     getQuota: () => Promise<{ success: boolean; quota?: any }>;
     logout: () => Promise<{ success: boolean }>;
@@ -578,7 +577,7 @@ interface IElectronAPI {
     getAccessToken: () => Promise<string | null>;
     getModels: () => Promise<{ success: boolean; models?: Array<{ modelId: string; modelName: string; provider: string; apiFormat: string }> }>;
     getProfileSummary: () => Promise<{ success: boolean; data?: ProfileSummaryData }>;
-    onCallback: (callback: (data: { code: string }) => void) => () => void;
+    onCallback: (callback: (data: { code: string; state?: string }) => void) => () => void;
     onQuotaChanged: (callback: () => void) => () => void;
   }
   enterprise: {
@@ -588,14 +587,14 @@ interface IElectronAPI {
     send: (status: 'online' | 'offline') => void;
   };
   auth: {
-    login: (loginUrl?: string) => Promise<{ success: boolean; error?: string }>;
-    exchange: (code: string) => Promise<{ success: boolean; user?: import('../store/slices/authSlice').UserProfile; quota?: { planName: string; subscriptionStatus: string; creditsLimit: number; creditsUsed: number; creditsRemaining: number }; error?: string }>;
+    login: () => Promise<{ success: boolean; error?: string }>;
+    exchange: (code: string, state?: string) => Promise<{ success: boolean; user?: import('../store/slices/authSlice').UserProfile; quota?: { planName: string; subscriptionStatus: string; creditsLimit: number; creditsUsed: number; creditsRemaining: number }; error?: string }>;
     getUser: () => Promise<{ success: boolean; user?: import('../store/slices/authSlice').UserProfile; quota?: { planName: string; subscriptionStatus: string; creditsLimit: number; creditsUsed: number; creditsRemaining: number } }>;
     getQuota: () => Promise<{ success: boolean; quota?: { planName: string; subscriptionStatus: string; creditsLimit: number; creditsUsed: number; creditsRemaining: number } }>;
     logout: () => Promise<{ success: boolean }>;
     refreshToken: () => Promise<{ success: boolean; accessToken?: string }>;
     getAccessToken: () => Promise<string | null>;
-    onCallback: (callback: (data: { code: string }) => void) => () => void;
+    onCallback: (callback: (data: { code: string; state?: string }) => void) => () => void;
   };
   qwen: Record<string, never>;
   feishu: {

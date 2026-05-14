@@ -1,7 +1,7 @@
 import { store } from '../store';
-import { setAuthLoading, setLoggedIn, setLoggedOut, updateQuota, setProfileSummary } from '../store/slices/authSlice';
-import { setServerModels, clearServerModels } from '../store/slices/modelSlice';
+import { setAuthLoading, setLoggedIn, setLoggedOut, setProfileSummary,updateQuota } from '../store/slices/authSlice';
 import type { Model } from '../store/slices/modelSlice';
+import { clearServerModels,setServerModels } from '../store/slices/modelSlice';
 
 class AuthService {
   private unsubCallback: (() => void) | null = null;
@@ -30,8 +30,8 @@ class AuthService {
     }
 
     // Listen for OAuth callback from protocol handler
-    this.unsubCallback = window.electron.auth.onCallback(async ({ code }) => {
-      await this.handleCallback(code);
+    this.unsubCallback = window.electron.auth.onCallback(async ({ code, state }) => {
+      await this.handleCallback(code, state);
     });
 
     // Listen for quota changes (e.g. after cowork session using server model)
@@ -57,15 +57,15 @@ class AuthService {
    * Initiate login (opens system browser).
    */
   async login() {
-    await window.electron.auth.login();
+    return window.electron.auth.login();
   }
 
   /**
    * Handle OAuth callback with auth code.
    */
-  async handleCallback(code: string) {
+  async handleCallback(code: string, state?: string) {
     try {
-      const result = await window.electron.auth.exchange(code);
+      const result = await window.electron.auth.exchange(code, state);
       if (result.success) {
         store.dispatch(setLoggedIn({ user: result.user, quota: result.quota }));
         await this.loadServerModels();

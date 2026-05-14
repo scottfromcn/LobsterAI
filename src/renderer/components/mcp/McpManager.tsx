@@ -1,8 +1,8 @@
+import { XCircleIcon as XCircleIconSolid } from '@heroicons/react/20/solid';
 import React, { useCallback,useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 
-import { XCircleIcon as XCircleIconSolid } from '@heroicons/react/20/solid';
-
+import { EnterpriseFeaturePolicy } from '../../../shared/enterprisePolicy';
 import { mcpCategories,mcpRegistry } from '../../data/mcpRegistry';
 import { i18nService } from '../../services/i18n';
 import { mcpService } from '../../services/mcp';
@@ -24,6 +24,7 @@ const TRANSPORT_BADGE_COLORS: Record<string, string> = {
 };
 
 type McpTab = 'installed' | 'marketplace' | 'custom';
+const allowManualMcpServers = EnterpriseFeaturePolicy.AllowManualMcpServers;
 
 /**
  * Text with line-clamp-2 that shows a popover above the text when truncated.
@@ -454,6 +455,7 @@ const McpManager: React.FC = () => {
             )}
             <div className={tabIndicatorClass('marketplace')} />
           </button>
+          {allowManualMcpServers && (
           <button type="button" onClick={() => setActiveTab('custom')} className={tabClass('custom')}>
             {i18nService.t('mcpCustom')}
             {customCount > 0 && (
@@ -463,6 +465,7 @@ const McpManager: React.FC = () => {
             )}
             <div className={tabIndicatorClass('custom')} />
           </button>
+          )}
         </div>
 
         {/* Category filter pills (Marketplace only) */}
@@ -643,7 +646,7 @@ const McpManager: React.FC = () => {
       )}
 
       {/* ── Tab: Custom ─────────────────────────────────── */}
-      {activeTab === 'custom' && (
+      {allowManualMcpServers && activeTab === 'custom' && (
         <div className="space-y-6">
           {/* Custom servers grid (add button + server cards) */}
           <div className="grid grid-cols-2 gap-3">

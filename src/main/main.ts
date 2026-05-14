@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import type { WebContents } from 'electron';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, powerMonitor, powerSaveBlocker, protocol, session, shell } from 'electron';
 import fs from 'fs';
@@ -9,6 +10,7 @@ import { buildSessionTitleFromInput } from '../common/sessionTitle';
 import { buildScheduledTaskEnginePrompt } from '../scheduledTask/enginePrompt';
 import { migrateScheduledTaskRunsToOpenclaw, migrateScheduledTasksToOpenclaw } from '../scheduledTask/migrate';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
+import { EnterpriseOidc } from '../shared/enterprisePolicy';
 import { PlatformRegistry } from '../shared/platform';
 import { ProviderName } from '../shared/providers';
 import { AgentManager } from './agentManager';
@@ -39,7 +41,7 @@ import {
   type PermissionResult,
 } from './libs/agentEngine';
 import { AppUpdateCoordinator } from './libs/appUpdateCoordinator';
-import { clearServerModelMetadata, getAllServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setAuthTokensGetter, setServerBaseUrlGetter, setStoreGetter, updateServerModelMetadata } from './libs/claudeSettings';
+import { clearServerModelMetadata, getAllServerModelMetadata, getCurrentApiConfig, resolveAllEnabledProviderConfigs, resolveCurrentApiConfig, resolveRawApiConfig, setAuthTokensGetter, setServerBaseUrlGetter, setStoreGetter } from './libs/claudeSettings';
 import {
   clearCopilotTokenState,
   initCopilotTokenManager,
@@ -1968,8 +1970,9 @@ if (!gotTheLock) {
   // Register custom protocol for OAuth callback
   app.setAsDefaultProtocolClient('metroai');
 
-  // Buffer for deep link auth code received before renderer is ready
-  let pendingAuthCode: string | null = null;
+  // Buffer for deep link auth data received before renderer is ready
+  let pendingAuthCallback: { code: string; state?: string } | null = null;
+  let pendingOidcRequest: { state: string; codeVerifier: string } | null = null;
 
   /**
    * Parse a metroai:// deep link and send (or buffer) the auth code.
@@ -1979,11 +1982,13 @@ if (!gotTheLock) {
       const parsed = new URL(url);
       if (parsed.hostname === 'auth' && parsed.pathname === '/callback') {
         const code = parsed.searchParams.get('code');
+        const state = parsed.searchParams.get('state') ?? undefined;
         if (code) {
+          const callbackData = { code, state };
           if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('auth:callback', { code });
+            mainWindow.webContents.send('auth:callback', callbackData);
           } else {
-            pendingAuthCode = code;
+            pendingAuthCallback = callbackData;
           }
         }
       }
@@ -1999,9 +2004,9 @@ if (!gotTheLock) {
 
   // Allow renderer to retrieve a buffered auth code on init
   ipcMain.handle('auth:getPendingCallback', () => {
-    const code = pendingAuthCode;
-    pendingAuthCode = null;
-    return code;
+    const callbackData = pendingAuthCallback;
+    pendingAuthCallback = null;
+    return callbackData;
   });
 
   // macOS: handle open-url event for deep links
@@ -2212,99 +2217,154 @@ if (!gotTheLock) {
   /**
    * Helper: Persist auth tokens into the kv store.
    */
-  const saveAuthTokens = (accessToken: string, refreshToken: string) => {
-    getStore().set('auth_tokens', { accessToken, refreshToken });
+  const saveAuthTokens = (
+    accessToken: string,
+    refreshToken: string,
+    idToken?: string,
+    expiresAt?: number,
+  ) => {
+    getStore().set('auth_tokens', { accessToken, refreshToken, idToken, expiresAt });
   };
 
-  const getAuthTokens = (): { accessToken: string; refreshToken: string } | null => {
-    return getStore().get<{ accessToken: string; refreshToken: string }>('auth_tokens') || null;
+  const getAuthTokens = (): { accessToken: string; refreshToken: string; idToken?: string; expiresAt?: number } | null => {
+    return getStore().get<{ accessToken: string; refreshToken: string; idToken?: string; expiresAt?: number }>('auth_tokens') || null;
   };
 
   const clearAuthTokens = () => {
     getStore().delete('auth_tokens');
   };
 
-  /**
-   * Helper: Fetch with Bearer token, auto-refresh on 401 and retry once.
-   */
-  const fetchWithAuth = async (url: string, options?: RequestInit): Promise<Response> => {
+  const isAuthenticated = () => {
     const tokens = getAuthTokens();
-    if (!tokens) throw new Error('No auth tokens');
-
-    const doFetch = (accessToken: string) =>
-      net.fetch(url, {
-        ...options,
-        headers: { ...(options?.headers as Record<string, string>), Authorization: `Bearer ${accessToken}` },
-      });
-
-    let resp = await doFetch(tokens.accessToken);
-
-    if (resp.status === 401 && tokens.refreshToken) {
-      const serverBaseUrl = getServerApiBaseUrl();
-      const refreshResp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-      });
-      if (refreshResp.ok) {
-        const refreshBody = await refreshResp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
-        if (refreshBody.code === 0 && refreshBody.data) {
-          saveAuthTokens(refreshBody.data.accessToken, refreshBody.data.refreshToken || tokens.refreshToken);
-          resp = await doFetch(refreshBody.data.accessToken);
-        }
-      }
-    }
-
-    return resp;
+    return Boolean(tokens?.accessToken);
   };
 
-  /**
-   * Normalize quota data from various server response formats into a unified shape.
-   */
-  const normalizeQuota = (raw: Record<string, unknown>) => {
-    let creditsLimit = 0;
-    let creditsUsed = 0;
-    let planName = t('authPlanFree');
-    let subscriptionStatus = 'free';
-
-    if (typeof raw.freeCreditsTotal === 'number') {
-      // Free user format from /api/user/quota
-      creditsLimit = raw.freeCreditsTotal as number;
-      creditsUsed = (raw.freeCreditsUsed as number) || 0;
-      planName = (raw.planName as string) || t('authPlanFree');
-      subscriptionStatus = (raw.subscriptionStatus as string) || 'free';
-    } else if (typeof raw.monthlyCreditsLimit === 'number') {
-      // Paid user format from /api/user/quota
-      creditsLimit = raw.monthlyCreditsLimit as number;
-      creditsUsed = (raw.monthlyCreditsUsed as number) || 0;
-      planName = (raw.planName as string) || t('authPlanStandard');
-      subscriptionStatus = (raw.subscriptionStatus as string) || 'active';
-    } else if (typeof raw.dailyCreditsLimit === 'number') {
-      // Legacy exchange format
-      creditsLimit = raw.dailyCreditsLimit as number;
-      creditsUsed = (raw.dailyCreditsUsed as number) || 0;
-      planName = (raw.planName as string) || t('authPlanFree');
-      subscriptionStatus = (raw.subscriptionStatus as string) || 'free';
-    } else if (typeof raw.creditsLimit === 'number') {
-      // Already normalized
-      return raw;
+  const requireAuthenticated = () => {
+    if (isAuthenticated()) {
+      return null;
     }
+    return { success: false, error: 'Authentication required', code: 'AUTH_REQUIRED' };
+  };
 
+  const encodeBase64Url = (buffer: Buffer) =>
+    buffer.toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+
+  const decodeJwtPayload = (token?: string): Record<string, unknown> | null => {
+    if (!token) return null;
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    try {
+      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(Buffer.from(payload, 'base64').toString('utf8')) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+
+  const normalizeOidcUser = (raw?: Record<string, unknown> | null) => {
+    const data = raw ?? {};
+    const subject = String(data.sub ?? data.userId ?? data.id ?? data.yid ?? 'enterprise-user');
     return {
-      planName,
-      subscriptionStatus,
-      creditsLimit,
-      creditsUsed,
-      creditsRemaining: Math.max(0, creditsLimit - creditsUsed),
+      yid: subject,
+      nickname: String(data.name ?? data.nickname ?? data.preferred_username ?? data.username ?? subject),
+      avatarUrl: typeof data.picture === 'string' ? data.picture : null,
+      userId: String(data.userId ?? subject),
     };
   };
 
-  ipcMain.handle('auth:login', async (_event, { loginUrl }: { loginUrl?: string } = {}) => {
+  const buildDefaultQuota = () => ({
+    planName: 'Enterprise',
+    subscriptionStatus: 'active',
+    creditsLimit: Number.MAX_SAFE_INTEGER,
+    creditsUsed: 0,
+    creditsRemaining: Number.MAX_SAFE_INTEGER,
+  });
+
+  const parseTokenResponse = async (response: Response) => {
+    const text = await response.text();
+    let data: Record<string, unknown> = {};
     try {
-      if (!loginUrl) return { success: false, error: 'No login URL provided' };
-      const baseUrl = loginUrl;
-      const finalUrl = `${baseUrl}?source=electron`;
-      await shell.openExternal(finalUrl);
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      data = Object.fromEntries(new URLSearchParams(text).entries());
+    }
+    if (!response.ok) {
+      throw new Error(typeof data.error_description === 'string'
+        ? data.error_description
+        : typeof data.error === 'string'
+          ? data.error
+          : `OIDC token request failed with HTTP ${response.status}`);
+    }
+    return data;
+  };
+
+  const requestOidcToken = async (params: Record<string, string>) => {
+    const body = new URLSearchParams({
+      client_id: EnterpriseOidc.ClientId,
+      client_secret: EnterpriseOidc.ClientSecret,
+      redirect_uri: EnterpriseOidc.RedirectUri,
+      ...params,
+    });
+    const response = await net.fetch(EnterpriseOidc.TokenEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    return parseTokenResponse(response);
+  };
+
+  const fetchOidcUserInfo = async (accessToken: string, idToken?: string) => {
+    try {
+      const response = await net.fetch(EnterpriseOidc.UserInfoEndpoint, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (response.ok) {
+        return await response.json() as Record<string, unknown>;
+      }
+    } catch (error) {
+      console.warn('[Auth] userinfo request failed, falling back to token claims:', error);
+    }
+    return decodeJwtPayload(idToken) ?? decodeJwtPayload(accessToken);
+  };
+
+  const persistOidcTokenBody = (body: Record<string, unknown>) => {
+    const accessToken = typeof body.access_token === 'string' ? body.access_token : '';
+    const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : '';
+    const idToken = typeof body.id_token === 'string' ? body.id_token : undefined;
+    if (!accessToken) {
+      throw new Error('OIDC response did not include an access token');
+    }
+    const expiresIn = typeof body.expires_in === 'number'
+      ? body.expires_in
+      : Number.parseInt(String(body.expires_in ?? ''), 10);
+    saveAuthTokens(
+      accessToken,
+      refreshToken,
+      idToken,
+      Number.isFinite(expiresIn) ? Date.now() + expiresIn * 1000 : undefined,
+    );
+    return { accessToken, refreshToken, idToken };
+  };
+
+  ipcMain.handle('auth:login', async () => {
+    try {
+      const codeVerifier = encodeBase64Url(crypto.randomBytes(32));
+      const state = encodeBase64Url(crypto.randomBytes(18));
+      const codeChallenge = encodeBase64Url(crypto.createHash('sha256').update(codeVerifier).digest());
+      pendingOidcRequest = { state, codeVerifier };
+
+      const url = new URL(EnterpriseOidc.AuthorizationEndpoint);
+      url.searchParams.set('response_type', EnterpriseOidc.ResponseType);
+      url.searchParams.set('client_id', EnterpriseOidc.ClientId);
+      url.searchParams.set('redirect_uri', EnterpriseOidc.RedirectUri);
+      url.searchParams.set('scope', EnterpriseOidc.Scope);
+      url.searchParams.set('state', state);
+      url.searchParams.set('code_challenge', codeChallenge);
+      url.searchParams.set('code_challenge_method', EnterpriseOidc.CodeChallengeMethod);
+      await shell.openExternal(url.toString());
       return { success: true };
     } catch (error) {
       console.error('[Auth] login failed:', error);
@@ -2312,20 +2372,77 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('auth:exchange', async () => {
-    return { success: false, error: 'Server authentication is no longer supported.' };
+  ipcMain.handle('auth:exchange', async (_event, payload: { code: string; state?: string } | string) => {
+    try {
+      const code = typeof payload === 'string' ? payload : payload.code;
+      const state = typeof payload === 'string' ? undefined : payload.state;
+      if (!code) {
+        return { success: false, error: 'Missing authorization code' };
+      }
+      if (!pendingOidcRequest) {
+        return { success: false, error: 'Missing OIDC login state' };
+      }
+      if (state && state !== pendingOidcRequest.state) {
+        return { success: false, error: 'Invalid OIDC login state' };
+      }
+      const tokenBody = await requestOidcToken({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier: pendingOidcRequest.codeVerifier,
+      });
+      pendingOidcRequest = null;
+      const tokenData = persistOidcTokenBody(tokenBody);
+      const userInfo = await fetchOidcUserInfo(tokenData.accessToken, tokenData.idToken);
+      return {
+        success: true,
+        user: normalizeOidcUser(userInfo),
+        quota: buildDefaultQuota(),
+      };
+    } catch (error) {
+      console.error('[Auth] exchange failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to exchange auth code' };
+    }
   });
 
   ipcMain.handle('auth:getUser', async () => {
-    return { success: false };
+    try {
+      const tokens = getAuthTokens();
+      if (!tokens?.accessToken) {
+        return { success: false };
+      }
+      const userInfo = await fetchOidcUserInfo(tokens.accessToken, tokens.idToken);
+      return {
+        success: true,
+        user: normalizeOidcUser(userInfo),
+        quota: buildDefaultQuota(),
+      };
+    } catch (error) {
+      console.warn('[Auth] failed to restore user session:', error);
+      clearAuthTokens();
+      return { success: false };
+    }
   });
 
   ipcMain.handle('auth:getQuota', async () => {
-    return { success: false };
+    if (!isAuthenticated()) return { success: false };
+    return { success: true, quota: buildDefaultQuota() };
   });
 
   ipcMain.handle('auth:getProfileSummary', async () => {
-    return { success: false };
+    if (!isAuthenticated()) return { success: false };
+    const tokens = getAuthTokens();
+    const userInfo = await fetchOidcUserInfo(tokens!.accessToken, tokens!.idToken);
+    const user = normalizeOidcUser(userInfo);
+    return {
+      success: true,
+      data: {
+        id: Number.parseInt(user.userId ?? '0', 10) || 0,
+        nickname: user.nickname,
+        avatarUrl: user.avatarUrl,
+        totalCreditsRemaining: Number.MAX_SAFE_INTEGER,
+        creditItems: [],
+      },
+    };
   });
 
   ipcMain.handle('auth:logout', async () => {
@@ -2335,11 +2452,29 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle('auth:refreshToken', async () => {
-    return { success: false };
+    try {
+      const tokens = getAuthTokens();
+      if (!tokens?.refreshToken) {
+        return { success: false };
+      }
+      const tokenBody = await requestOidcToken({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refreshToken,
+      });
+      const refreshed = persistOidcTokenBody(tokenBody);
+      if (!refreshed.refreshToken) {
+        saveAuthTokens(refreshed.accessToken, tokens.refreshToken, refreshed.idToken);
+      }
+      return { success: true };
+    } catch (error) {
+      console.warn('[Auth] refresh token failed:', error);
+      clearAuthTokens();
+      return { success: false };
+    }
   });
 
   ipcMain.handle('auth:getAccessToken', async () => {
-    return null;
+    return getAuthTokens()?.accessToken ?? null;
   });
 
   ipcMain.handle('auth:getModels', async () => {
@@ -2347,6 +2482,25 @@ if (!gotTheLock) {
   });
 
   // Skills IPC handlers
+  let marketplaceSkillSources = new Set<string>();
+  const collectMarketplaceSkillSources = (value: unknown, sources = new Set<string>()) => {
+    if (Array.isArray(value)) {
+      value.forEach(item => collectMarketplaceSkillSources(item, sources));
+      return sources;
+    }
+    if (!value || typeof value !== 'object') {
+      return sources;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of ['url', 'downloadUrl']) {
+      if (typeof record[key] === 'string') {
+        sources.add(record[key]);
+      }
+    }
+    Object.values(record).forEach(item => collectMarketplaceSkillSources(item, sources));
+    return sources;
+  };
+
   ipcMain.handle('skills:list', () => {
     try {
       const skills = getSkillManager().listSkills();
@@ -2376,10 +2530,16 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle('skills:download', async (_event, source: string) => {
+    if (!marketplaceSkillSources.has(source)) {
+      return { success: false, error: 'Manual skill installation is disabled.' };
+    }
     return getSkillManager().downloadSkill(source);
   });
 
   ipcMain.handle('skills:upgrade', async (_event, skillId: string, downloadUrl: string) => {
+    if (!marketplaceSkillSources.has(downloadUrl)) {
+      return { success: false, error: 'Manual skill installation is disabled.' };
+    }
     return getSkillManager().upgradeSkill(skillId, downloadUrl);
   });
 
@@ -2449,6 +2609,7 @@ if (!gotTheLock) {
         req.on('error', reject);
         req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
       });
+      marketplaceSkillSources = collectMarketplaceSkillSources(JSON.parse(data));
       return { success: true, data };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to fetch skill marketplace' };
@@ -2557,8 +2718,13 @@ if (!gotTheLock) {
     env?: Record<string, string>;
     url?: string;
     headers?: Record<string, string>;
+    registryId?: string;
+    githubUrl?: string;
   }) => {
     try {
+      if (!data.registryId) {
+        return { success: false, error: 'Manual MCP server creation is disabled.' };
+      }
       getMcpStore().createServer(data as McpServerFormData);
       const servers = getMcpStore().listServers();
       // Trigger async MCP bridge refresh (don't await — let UI show DB result immediately)
@@ -2667,6 +2833,9 @@ if (!gotTheLock) {
     modelOverride?: string;
   }) => {
     try {
+      const authError = requireAuthenticated();
+      if (authError) return authError;
+
       const engineStatus = await ensureOpenClawRunningForCowork();
       if (engineStatus.phase !== 'running') {
         return getEngineNotReadyResponse(engineStatus);
@@ -2787,6 +2956,9 @@ if (!gotTheLock) {
     imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string }>;
   }) => {
     try {
+      const authError = requireAuthenticated();
+      if (authError) return authError;
+
       const engineStatus = await ensureOpenClawRunningForCowork();
       if (engineStatus.phase !== 'running') {
         return getEngineNotReadyResponse(engineStatus);
